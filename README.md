@@ -1229,67 +1229,176 @@ chmod +x /root/soal5_testing.sh
 
 ## Soal 6
 ### Perintah soal
+Memberikan alamat IP tetap (Fixed Address) kepada klien kugisaki:
+1. Identifikasi MAC Address: Mendapatkan MAC Address dari interface eth0 pada node kugisaki menggunakan perintah `ip link show eth0`.
+2. Konfigurasi Fixed Address: Menambahkan blok `host kugisaki` pada file konfigurasi `/etc/dhcp/dhcpd.conf` di node `tengen` dengan mengikat MAC Address klien ke alamat statis `10.93.3.99` (berada di luar rentang pool short dan long lease).
+3. Validasi & Pengujian: Melakukan validasi sintaks dhcpd, merestart layanan DHCP server, serta memperbarui sewa IP pada klien `kugisaki`.
 
+Penempatan Script pada Node
+| Node | File Script | Fungsi |
+| --- | --- | --- |
+| kugisaki | `/root/soal6_mac.sh` | Mengambil dan menampilkan MAC Address dari interface eth0 |
+| tengen | `/root/soal6.sh` | Menambahkan blok konfigurasi fixed-address kugisaki dan merestart service |
+| kugisaki | `/root/soal6_testing.sh` | Meminta ulang IP Lease via DHCP dan memverifikasi alamat IP |
+   
 ### Langkah pengerjaan
-1. Buat blablabla
+1. Pada Node kugisaki (Mendapatkan MAC Address)
+   Buka terminal node kugisaki, jalankan perintah untuk melihat MAC Address:
+   
+```bash
+ip link show eth0 | grep ether
+```
+Catat MAC Address yang tampil
+
+2. Pada Node tengen (DHCP Server)
+   Buka terminal node tengen, buat file /root/soal6.sh:
    
    ```bash
-   ini script
+   nano /root/soal6.sh
+   #!/bin/bash
+   cat << 'EOF' >> /etc/dhcp/dhcpd.conf
+
+   host kugisaki {
+    hardware ethernet 00:50:79:66:68:06;
+    fixed-address 10.93.3.99;
+   }
+   EOF
+
+   dhcpd -t -cf /etc/dhcp/dhcpd.conf
+   service isc-dhcp-server restart
+   service isc-dhcp-server status
    ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
+   Beri izin eksekusi dan jalankan:
+
+```Bash
+   chmod +x /root/soal6.sh
+   /root/soal6.sh
+```
+
+3. Script Testing
+   Pada Node kugisaki: Buat file /root/soal6_testing.sh:
+
+```Bash
+nano /root/soal6_testing.sh
+```
+Isikan script pengujian berikut:
+
+```Bash
+#!/bin/bash
+echo "TESTING SOAL 6: KLIEN kugisaki"
+udhcpc -i eth0 -n -q
+ip a show eth0
+```
+Beri izin eksekusi dan jalankan:
+
+```Bash
+chmod +x /root/soal6_testing.sh
+/root/soal6_testing.sh
+```
+
+<img width="1127" height="816" alt="image" src="https://github.com/user-attachments/assets/974bb0ba-35a1-48e3-b294-21955ed370c7" />
+
+<img width="1090" height="830" alt="image" src="https://github.com/user-attachments/assets/9e39aa6d-7312-4bec-9508-30293188ca8a" />
 
 ---
 
 ## Soal 7
 ### Perintah soal
+Melakukan verifikasi menyeluruh terhadap konfigurasi jaringan pada seluruh klien (itadori, fushiguro, zenin, okkotsu, ino, kusakabe, miwa, kugisaki):
+
+1. Verifikasi Network & Broadcast: Memastikan IP address yang diperoleh klien sesuai dengan alokasi subnet (/24) dan alamat broadcast yang benar (.2.255 atau .3.255).
+2. Verifikasi Routing: Memastikan default gateway mengarah dengan tepat ke router lokal (.2.1 atau .3.1).
+3. Verifikasi DNS Resolver: Memastikan file /etc/resolv.conf mencatat nameserver 10.93.1.2, 10.93.1.3 serta domain search k59.com.
+4. Pencocokan Lease Server: Memeriksa log pada /var/lib/dhcp/dhcpd.leases di node tengen untuk memastikan tidak ada IP ganda dan seluruh alokasi pool berjalan sesuai skema.
+
+| Node |	File Script	|Fungsi |
+| Klien (Semua Node)|	/root/soal7_testing.sh |	Memverifikasi IP, route, dan konfigurasi resolv.conf pada klien |
+| tengen |	/root/soal7_testing.sh |	Memeriksa rekam jejak penyewaan IP pada file dhcpd.leases |
+
 
 ### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
+1. Script Testing
+   Pada Klien Alpine (itadori, fushiguro, dll) Buat file /root/soal7_testing.sh pada klien:
+
+```Bash
+nano /root/soal7_testing.sh
+```
+Isikan script berikut:
+
+```Bash
+#!/bin/bash
+echo "=== VERIFIKASI KLIEN: $(hostname) ==="
+ip a show eth0
+ip route
+cat /etc/resolv.conf
+```
+Beri izin eksekusi dan jalankan:
+
+```Bash
+chmod +x /root/soal7_testing.sh
+/root/soal7_testing.sh
+```
+2. Pada Node tengen
+Buat file /root/soal7_testing.sh di tengen:
+
+```Bash
+nano /root/soal7_testing.sh
+```
+Isikan script berikut:
+
+```Bash
+#!/bin/bash
+echo "=== DAFTAR LEASE AKTIF DI DHCP SERVER ==="
+grep -E "^lease|hardware ethernet|client-hostname|ends" /var/lib/dhcp/dhcpd.leases
+```
+Beri izin eksekusi dan jalankan:
+
+```Bash
+chmod +x /root/soal7_testing.sh
+/root/soal7_testing.sh
+```
+<img width="1121" height="822" alt="image" src="https://github.com/user-attachments/assets/d9130fe4-41ab-4785-903f-1b4e9d9da0db" />
+
+<img width="1107" height="828" alt="image" src="https://github.com/user-attachments/assets/f45fb39c-a1b5-428b-aa07-c9678e26f473" />
+
+
 ---
 
 ## Soal 8
 ### Perintah soal
+Melakukan pemantauan dan analisis lalu lintas paket DHCP menggunakan tcpdump untuk membuktikan urutan mekanisme D.O.R.A (Discover, Offer, Request, ACK):
 
+1. Menangkap paket di port DHCP (67 dan 68) pada interface eth0 node tengen.
+2. Memicu permintaan sewa IP baru dari sisi klien menggunakan udhcpc.
+3. Menganalisis parameter penting dalam paket transmisi:
+- Urutan pesan DORA.
+- Server-ID (10.93.4.10).
+- Your-IP / yiaddr (Alamat IP yang disewakan ke klien).
+- Gateway-IP / giaddr (Alamat IP router relay yang meneruskan paket).
+
+Penempatan Script pada Node
+| Node | File Script | Fungsi |
+| tengen | /root/soal8.sh | Menginstal tcpdump dan menangkap lalu lintas DHCP port 67/68 |
+| Klien (itadori) | - | Memicu DHCP request via udhcpc -i eth0 -n -q| 
+  
 ### Langkah pengerjaan
-1. Buat blablabla
+1. Pada Node tengen
+Buka terminal tengen, jalankan perintah tcpdump:
+```Bash
+apt-get update -y && apt-get install -y tcpdump
+tcpdump -i eth0 -n -vvv port 67 or port 68
+```
+
+2. Pada Klien (itadori)
+Buka terminal itadori, picu pembaruan IP:
    
    ```bash
-   ini script
+   udhcpc -i eth0 -n -q
    ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
+3. Ambil tangkapan layar (screenshot) pada terminal tengen untuk memperlihatkan log urutan Discover, Offer, Request, ACK beserta atribut giaddr dan yiaddr.
+
+<img width="1100" height="816" alt="image" src="https://github.com/user-attachments/assets/03449cf6-4d9b-49e2-87a9-46d44101ab79" />
+ 
  
  ---
 
