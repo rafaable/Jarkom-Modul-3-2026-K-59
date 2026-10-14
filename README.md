@@ -1451,157 +1451,1716 @@ Buka terminal itadori, picu pembaruan IP:
 
 ## Soal 11
 ### Perintah soal
+Membangun sistem penamaan domain resmi `jujutsu.k59.com` menggunakan BIND9:
+1. **Konfigurasi DNS Master (`utahime` - `10.93.1.2`):** Mengatur SOA record, delegasi NS untuk `utahime` dan `shoko`, serta menerapkan `allow-transfer` dan `also-notify` ke IP `shoko`.
+2. **Konfigurasi DNS Slave (`shoko` - `10.93.1.3`):** Mengonfigurasi zona bertipe `slave` yang menyalin zona dari master (`10.93.1.2`) dan menyimpan file cache di `/var/cache/bind/db.jujutsu.k59.com`.
+3. **Validasi & Uji Coba:** Memastikan transfer zona otomatis berjalan ketika serial number dinaikkan, serta melakukan query `dig` ke DNS Master dan DNS Slave dari klien.
 
-### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
+---
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`utahime`** | `/root/soal11.sh` | Konfigurasi IP statis, instalasi BIND9, pembuatan zona master `jujutsu.k59.com`, SOA record, delegasi NS, dan pengaturan `allow-transfer` |
+| **`shoko`** | `/root/soal11.sh` | Konfigurasi IP statis, instalasi BIND9, konfigurasi zona slave `jujutsu.k59.com`, dan penerimaan transfer zona dari `utahime` |
+| **`utahime`** | `/root/soal11_testing.sh` | Validasi sintaks `named-checkconf`, verifikasi zona `named-checkzone`, status service, dan query lokal DNS Master |
+| **`utahime`** | `/root/soal11_naik_serial.sh` | Menaikkan nomor serial zona master secara otomatis, reload BIND9, dan verifikasi serial baru |
+| **`shoko`** | `/root/soal11_testing.sh` | Cek status service BIND9, verifikasi file zona hasil replikasi `/var/cache/bind/db.jujutsu.k59.com`, dan query SOA DNS Slave |
+| **Klien (`itadori`)** | `/root/soal11_testing.sh` | Instalasi `bind-tools` (`dig`), pengujian resolusi domain `jujutsu.k59.com` ke Master dan Slave, serta verifikasi serial SOA |
+
+---
+
+### Langkah Pengerjaan
+
+#### 1. Pada Node `utahime` (DNS Master)
+
+Buka terminal node **`utahime`**, buat file `/root/soal11.sh`:
+
+```bash
+nano /root/soal11.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Atur IP statis utahime dan nameserver untuk instalasi paket
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.1.2/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.1.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi BIND9 dan dnsutils
+apt-get update -y
+apt-get install -y bind9 bind9utils bind9-doc dnsutils
+
+# 3. Konfigurasi named.conf.options
+cat << 'EOF' > /etc/bind/named.conf.options
+options {
+    directory "/var/cache/bind";
+    auth-nxdomain no;
+    listen-on { any; };
+    listen-on-v6 { none; };
+    allow-query { any; };
+    dnssec-validation no;
+};
+EOF
+
+# 4. Konfigurasi named.conf.local (Zone Master jujutsu.k59.com)
+cat << 'EOF' > /etc/bind/named.conf.local
+zone "jujutsu.k59.com" {
+    type master;
+    file "/etc/bind/jujutsu/db.jujutsu.k59.com";
+    allow-transfer { 10.93.1.3; };
+    also-notify { 10.93.1.3; };
+};
+EOF
+
+# 5. Buat direktori dan file database zona
+mkdir -p /etc/bind/jujutsu
+cat << 'EOF' > /etc/bind/jujutsu/db.jujutsu.k59.com
+;
+; BIND data file for jujutsu.k59.com
+;
+$TTL    604800
+@       IN      SOA     utahime.jujutsu.k59.com. root.jujutsu.k59.com. (
+                              2026101401 ; Serial
+                                  604800 ; Refresh
+                                   86400 ; Retry
+                                 2419200 ; Expire
+                                  604800 ) ; Negative Cache TTL
+;
+@       IN      NS      utahime.jujutsu.k59.com.
+@       IN      NS      shoko.jujutsu.k59.com.
+
+; A Record untuk Name Server
+utahime IN      A       10.93.1.2
+shoko   IN      A       10.93.1.3
+
+; Domain Utama (mengarah ke reverse proxy gojo)
+@       IN      A       10.93.1.4
+EOF
+
+# 6. Validasi sintaks konfigurasi BIND9
+named-checkconf
+named-checkzone jujutsu.k59.com /etc/bind/jujutsu/db.jujutsu.k59.com
+
+# 7. Restart service BIND9
+service named restart || service bind9 restart
+service named status || service bind9 status
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal11.sh
+/root/soal11.sh
+```
+
+---
+
+#### 2. Pada Node `shoko` (DNS Slave)
+
+Buka terminal node **`shoko`**, buat file `/root/soal11.sh`:
+
+```bash
+nano /root/soal11.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Atur IP statis shoko dan nameserver untuk instalasi paket
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.1.3/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.1.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi BIND9 dan dnsutils
+apt-get update -y
+apt-get install -y bind9 bind9utils bind9-doc dnsutils
+
+# 3. Konfigurasi named.conf.options
+cat << 'EOF' > /etc/bind/named.conf.options
+options {
+    directory "/var/cache/bind";
+    auth-nxdomain no;
+    listen-on { any; };
+    listen-on-v6 { none; };
+    allow-query { any; };
+    dnssec-validation no;
+};
+EOF
+
+# 4. Konfigurasi named.conf.local (Zone Slave jujutsu.k59.com)
+# File disimpan di /var/cache/bind/ karena direktori tersebut dapat ditulisi oleh user bind
+cat << 'EOF' > /etc/bind/named.conf.local
+zone "jujutsu.k59.com" {
+    type slave;
+    file "/var/cache/bind/db.jujutsu.k59.com";
+    masters { 10.93.1.2; };
+};
+EOF
+
+# 5. Validasi konfigurasi
+named-checkconf
+
+# 6. Restart service BIND9
+service named restart || service bind9 restart
+service named status || service bind9 status
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal11.sh
+/root/soal11.sh
+```
+
+---
+
+### Script Testing
+
+#### 1. Pada Node `utahime` (DNS Master)
+
+**A. Verifikasi Sintaks dan Layanan Awal:**
+
+Buka terminal node **`utahime`**, buat file `/root/soal11_testing.sh`:
+
+```bash
+nano /root/soal11_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 11: NODE utahime (DNS Master)"
+
+echo -e "\n[1] Pengecekan Sintaks named-checkconf:"
+named-checkconf && echo "named-checkconf OK"
+
+echo -e "\n[2] Pengecekan Zona named-checkzone:"
+named-checkzone jujutsu.k59.com /etc/bind/jujutsu/db.jujutsu.k59.com
+
+echo -e "\n[3] Status Layanan BIND9:"
+service named status 2>/dev/null || service bind9 status
+
+echo -e "\n[4] Query Dig Lokal ke Master (10.93.1.2):"
+dig @10.93.1.2 jujutsu.k59.com +short
+dig @10.93.1.2 jujutsu.k59.com SOA +noall +answer
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal11_testing.sh
+/root/soal11_testing.sh
+```  
+
+![alt text](assets/soal11_1.png)<br>  
+
+**B. Script Menaikkan Serial Number untuk Pembuktian Replikasi:**
+
+Buat file `/root/soal11_naik_serial.sh` di **`utahime`**:
+
+```bash
+nano /root/soal11_naik_serial.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "UJI REPLIKASI SOAL 11: MENAIKKAN SERIAL NUMBER PADA utahime"
+
+ZONE_FILE="/etc/bind/jujutsu/db.jujutsu.k59.com"
+CURRENT_SERIAL=$(grep -oE '[0-9]{10}' "$ZONE_FILE" | head -n 1)
+NEW_SERIAL=$((CURRENT_SERIAL + 1))
+
+echo "Serial saat ini : $CURRENT_SERIAL"
+echo "Menaikkan ke   : $NEW_SERIAL"
+
+sed -i "s/$CURRENT_SERIAL/$NEW_SERIAL/" "$ZONE_FILE"
+
+echo -e "\n[1] Validasi Zona Setelah Serial Dinaikkan:"
+named-checkzone jujutsu.k59.com "$ZONE_FILE"
+
+echo -e "\n[2] Reload BIND9 Master:"
+rndc reload || service bind9 reload || service named reload
+
+echo -e "\n[3] Verifikasi SOA Baru di Master (10.93.1.2):"
+dig @10.93.1.2 jujutsu.k59.com SOA +noall +answer
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal11_naik_serial.sh
+/root/soal11_naik_serial.sh
+```
+![alt text](assets/soal11_2.png) <br>  
+
+---
+
+#### 2. Pada Node `shoko` (DNS Slave)
+
+Buka terminal node **`shoko`**, buat file `/root/soal11_testing.sh`:
+
+```bash
+nano /root/soal11_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 11: NODE shoko (DNS Slave)"
+
+echo -e "\n[1] Status Layanan BIND9:"
+service named status 2>/dev/null || service bind9 status
+
+echo -e "\n[2] Verifikasi File Replikasi Zona dari Master:"
+if [ -f /var/cache/bind/db.jujutsu.k59.com ]; then
+    echo "File zona berhasil disinkronisasi ke /var/cache/bind/db.jujutsu.k59.com"
+    ls -l /var/cache/bind/db.jujutsu.k59.com
+else
+    echo "File zona belum ditemukan, memeriksa log zone transfer..."
+fi
+
+echo -e "\n[3] Query SOA ke Slave (Verifikasi Serial Tersinkronisasi):"
+dig @10.93.1.3 jujutsu.k59.com SOA +noall +answer
+
+echo -e "\n[4] Query A Record ke Slave (10.93.1.3):"
+dig @10.93.1.3 jujutsu.k59.com +short
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal11_testing.sh
+/root/soal11_testing.sh
+```
+
+![alt text](assets/soal11_3.png)<br>
+
+---
+
+#### 3. Pada Klien (`itadori`)
+
+Buka terminal klien **`itadori`**, buat file `/root/soal11_testing.sh`:
+
+```bash
+nano /root/soal11_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 11: KLIEN itadori (Uji Resolusi Domain & Replikasi)"
+
+# Pasang bind-tools jika perintah dig belum tersedia di Alpine
+if ! command -v dig &>/dev/null; then
+    echo "Mengunduh paket bind-tools..."
+    apk add --no-cache bind-tools 2>/dev/null || apt-get install -y dnsutils 2>/dev/null
+fi
+
+echo -e "\n[1] Query Dig Lengkap ke DNS Master utahime (10.93.1.2):"
+dig @10.93.1.2 jujutsu.k59.com
+
+echo -e "\n[2] Query Dig Lengkap ke DNS Slave shoko (10.93.1.3):"
+dig @10.93.1.3 jujutsu.k59.com
+
+echo -e "\n[3] Perbandingan Nomor Serial SOA (Master vs Slave):"
+MASTER_SERIAL=$(dig @10.93.1.2 jujutsu.k59.com SOA +short | awk '{print $3}')
+SLAVE_SERIAL=$(dig @10.93.1.3 jujutsu.k59.com SOA +short | awk '{print $3}')
+echo "Nomor Serial pada Master (utahime): $MASTER_SERIAL"
+echo "Nomor Serial pada Slave  (shoko)  : $SLAVE_SERIAL"
+
+if [ -n "$MASTER_SERIAL" ] && [ "$MASTER_SERIAL" = "$SLAVE_SERIAL" ]; then
+    echo "Status: SINKRON SEMPURNA (Kedua server memiliki nomor serial identik)"
+else
+    echo "Status: BELUM SINKRON (Menunggu transfer zona selesai)"
+fi
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal11_testing.sh
+/root/soal11_testing.sh
+```
  
+ <br>![alt text](assets/soal11_4.png)
+ <br>![alt text](assets/soal11_5.png)
  ---
 
 ## Soal 12
 ### Perintah soal
+Mengembangkan peta domain resmi Jujutsu High dan mengaktifkan akses resolusi internet:
+1. **A Record & CNAME:** Menetapkan A record `jujutsu.k59.com` mengarah ke reverse proxy `gojo` (`10.93.1.4`) dan membuat alias CNAME `www.jujutsu.k59.com` yang merujuk ke domain utama.
+2. **Reverse DNS (Zona PTR):** Membuat zona reverse `1.93.10.in-addr.arpa` pada `utahime` untuk memetakan IP `10.93.1.4` (`gojo`) kembali ke domain `jujutsu.k59.com`.
+3. **DNS Forwarder:** Mengonfigurasi fitur forwarder pada BIND9 yang mengarah ke gateway internet (`192.168.122.1`), sehingga seluruh permintaan resolusi domain eksternal dapat dijawab.
+4. **Validasi & Pembuktian:** Menguji resolusi CNAME, query PTR (-x), resolusi domain publik (`google.com`), dan pembuktian ping internet dari terminal klien (`itadori`).
 
-### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
+---
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`utahime`** | `/root/soal12.sh` | Konfigurasi A record, CNAME `www`, pembuatan zona Reverse DNS PTR `1.93.10.in-addr.arpa`, konfigurasi forwarder `192.168.122.1`, dan reload BIND9 |
+| **`shoko`** | `/root/soal12.sh` | Konfigurasi zona slave untuk Reverse DNS `1.93.10.in-addr.arpa`, forwarder `192.168.122.1`, dan reload BIND9 |
+| **Klien (`itadori`)** | `/root/soal12_testing.sh` | Pengujian query CNAME, query PTR IP `10.93.1.4`, resolusi domain luar via forwarder, dan pengujian ping ke domain internet |
+
+---
+
+### Langkah Pengerjaan
+
+#### 1. Pada Node `utahime` (DNS Master)
+
+Buka terminal node **`utahime`**, buat file `/root/soal12.sh`:
+
+```bash
+nano /root/soal12.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Konfigurasi named.conf.options dengan DNS Forwarder ke gateway internet
+cat << 'EOF' > /etc/bind/named.conf.options
+options {
+    directory "/var/cache/bind";
+    auth-nxdomain no;
+    listen-on { any; };
+    listen-on-v6 { none; };
+    allow-query { any; };
+    dnssec-validation no;
+
+    // DNS Forwarder ke IP gateway NAT internet
+    forwarders {
+        192.168.122.1;
+    };
+};
+EOF
+
+# 2. Perbarui named.conf.local untuk menambahkan Zona Reverse PTR
+cat << 'EOF' > /etc/bind/named.conf.local
+// Zona Forward jujutsu.k59.com
+zone "jujutsu.k59.com" {
+    type master;
+    file "/etc/bind/jujutsu/db.jujutsu.k59.com";
+    allow-transfer { 10.93.1.3; };
+    also-notify { 10.93.1.3; };
+};
+
+// Zona Reverse untuk subnet 10.93.1.0/24 (DMZ)
+zone "1.93.10.in-addr.arpa" {
+    type master;
+    file "/etc/bind/jujutsu/db.1.93.10.in-addr.arpa";
+    allow-transfer { 10.93.1.3; };
+    also-notify { 10.93.1.3; };
+};
+EOF
+
+# 3. Perbarui Zona Forward: Tambahkan A Record gojo dan CNAME www
+cat << 'EOF' > /etc/bind/jujutsu/db.jujutsu.k59.com
+;
+; BIND data file for jujutsu.k59.com
+;
+$TTL    604800
+@       IN      SOA     utahime.jujutsu.k59.com. root.jujutsu.k59.com. (
+                              2026101403 ; Serial
+                                  604800 ; Refresh
+                                   86400 ; Retry
+                                 2419200 ; Expire
+                                  604800 ) ; Negative Cache TTL
+;
+@       IN      NS      utahime.jujutsu.k59.com.
+@       IN      NS      shoko.jujutsu.k59.com.
+
+; A Record untuk Name Server
+utahime IN      A       10.93.1.2
+shoko   IN      A       10.93.1.3
+
+; Domain Utama (mengarah ke gojo - Public Reverse Proxy)
+@       IN      A       10.93.1.4
+gojo    IN      A       10.93.1.4
+
+; CNAME www merujuk ke domain utama jujutsu.k59.com
+www     IN      CNAME   jujutsu.k59.com.
+EOF
+
+# 4. Buat File Database Zona Reverse DNS (PTR)
+cat << 'EOF' > /etc/bind/jujutsu/db.1.93.10.in-addr.arpa
+;
+; BIND reverse data file for 10.93.1.0/24
+;
+$TTL    604800
+@       IN      SOA     utahime.jujutsu.k59.com. root.jujutsu.k59.com. (
+                              2026101401 ; Serial
+                                  604800 ; Refresh
+                                   86400 ; Retry
+                                 2419200 ; Expire
+                                  604800 ) ; Negative Cache TTL
+;
+@       IN      NS      utahime.jujutsu.k59.com.
+@       IN      NS      shoko.jujutsu.k59.com.
+
+; PTR Record: 10.93.1.4 -> jujutsu.k59.com
+4       IN      PTR     jujutsu.k59.com.
+EOF
+
+# 5. Validasi konfigurasi sintaks dan zona
+named-checkconf
+named-checkzone jujutsu.k59.com /etc/bind/jujutsu/db.jujutsu.k59.com
+named-checkzone 1.93.10.in-addr.arpa /etc/bind/jujutsu/db.1.93.10.in-addr.arpa
+
+# 6. Reload layanan BIND9
+rndc reload || service named restart || service bind9 restart
+service named status || service bind9 status
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal12.sh
+/root/soal12.sh
+```
+
+---
+
+#### 2. Pada Node `shoko` (DNS Slave)
+
+Buka terminal node **`shoko`**, buat file `/root/soal12.sh`:
+
+```bash
+nano /root/soal12.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Konfigurasi named.conf.options dengan DNS Forwarder ke gateway internet
+cat << 'EOF' > /etc/bind/named.conf.options
+options {
+    directory "/var/cache/bind";
+    auth-nxdomain no;
+    listen-on { any; };
+    listen-on-v6 { none; };
+    allow-query { any; };
+    dnssec-validation no;
+
+    forwarders {
+        192.168.122.1;
+    };
+};
+EOF
+
+# 2. Konfigurasi named.conf.local (Zona Slave Forward & Reverse)
+cat << 'EOF' > /etc/bind/named.conf.local
+zone "jujutsu.k59.com" {
+    type slave;
+    file "/var/cache/bind/db.jujutsu.k59.com";
+    masters { 10.93.1.2; };
+};
+
+zone "1.93.10.in-addr.arpa" {
+    type slave;
+    file "/var/cache/bind/db.1.93.10.in-addr.arpa";
+    masters { 10.93.1.2; };
+};
+EOF
+
+# 3. Validasi konfigurasi
+named-checkconf
+
+# 4. Reload layanan BIND9
+rndc reload || service named restart || service bind9 restart
+service named status || service bind9 status
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal12.sh
+/root/soal12.sh
+```
+
+---
+
+### Script Testing
+
+#### Pada Klien (`itadori`)
+
+Buka terminal klien **`itadori`**, buat file `/root/soal12_testing.sh`:
+
+```bash
+nano /root/soal12_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 12: KLIEN $(hostname) (CNAME, PTR, & DNS FORWARDER)"
+
+# Pastikan bind-tools terpasang
+if ! command -v dig &>/dev/null; then
+    apk add --no-cache bind-tools 2>/dev/null || apt-get install -y dnsutils 2>/dev/null
+fi
+
+echo -e "\n[1] Pengujian CNAME www.jujutsu.k59.com:"
+dig @10.93.1.2 www.jujutsu.k59.com +noall +answer
+
+echo -e "\n[2] Pengujian Reverse DNS (PTR) untuk IP 10.93.1.4 (gojo):"
+dig @10.93.1.2 -x 10.93.1.4 +noall +answer
+
+echo -e "\n[3] Pengujian DNS Forwarder ke Internet via DNS Master (google.com):"
+dig @10.93.1.2 google.com +short
+
+echo -e "\n[4] Pengujian Ping ke Domain Internet (google.com):"
+echo "nameserver 10.93.1.2" > /etc/resolv.conf
+ping -c 3 google.com
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal12_testing.sh
+/root/soal12_testing.sh
+```
  
  ---
 
 ## Soal 13
 ### Perintah soal
+Membangun klaster database terpusat yang redundan menggunakan MariaDB Replikasi Master-Slave:
+1. **Konfigurasi DB Master (`yaga` - `10.93.4.8`):** Mengaktifkan binary logging (`log-bin`), menetapkan `server-id = 1`, mendengarkan pada semua interface (`bind-address = 0.0.0.0`), dan membuat user replikasi.
+2. **Inisialisasi Database & Skema:** Membuat database `db_shibuya_k59` dan tabel `request_logs` di Master, serta memberikan hak akses remote bagi seluruh node di Network 4 (`10.93.4.%`).
+3. **Konfigurasi DB Slave (`inumaki` - `10.93.4.9`):** Menetapkan `server-id = 2`, menghubungkan slave ke master secara realtime menggunakan `CHANGE MASTER TO`, dan mengaktifkan proses replikasi (`START SLAVE`).
+4. **Validasi & Pembuktian:** Memeriksa status replikasi (`Slave_IO_Running: Yes`, `Slave_SQL_Running: Yes`), memasukkan data baru di Master, dan memverifikasi data tersebut langsung tersinkronisasi secara realtime di Slave.
 
-### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
+---
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`yaga`** | `/root/soal13.sh` | Konfigurasi IP statis, instalasi MariaDB Server, konfigurasi `server-id = 1` & `log-bin`, inisialisasi database `db_shibuya_k59`, tabel `request_logs`, user replikasi, dan hak akses remote Network 4 |
+| **`inumaki`** | `/root/soal13.sh` | Konfigurasi IP statis, instalasi MariaDB Server, konfigurasi `server-id = 2`, penarikan posisi log master, dan inisialisasi slave replikasi |
+| **`yaga`** | `/root/soal13_testing.sh` | Menampilkan status master (`SHOW MASTER STATUS`) dan memasukkan data log uji coba ke tabel `request_logs` |
+| **`inumaki`** | `/root/soal13_testing.sh` | Memverifikasi status replikasi (`SHOW SLAVE STATUS`) dan menampilkan data yang berhasil disalin dari master |
+
+---
+
+### Langkah Pengerjaan
+
+#### 1. Pada Node `yaga` (DB Master)
+
+Buka terminal node **`yaga`**, buat file `/root/soal13.sh`:  
+
+Jalanin ini di terminal yaga  
+
+```
+mariadb -u root -e "CREATE USER IF NOT EXISTS 'jujutsu_user'@'10.93.4.%' IDENTIFIED BY 'password123'; GRANT ALL PRIVILEGES ON db_shibuya_k59.* TO 'jujutsu_user'@'10.93.4.%'; FLUSH PRIVILEGES;"
+```
+
+```bash
+nano /root/soal13.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Atur IP statis yaga dan nameserver untuk instalasi paket
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.4.8/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi paket MariaDB Server & Client
+apt-get update -y
+apt-get install -y mariadb-server mariadb-client
+
+# Buat direktori log jika diperlukan
+mkdir -p /var/log/mysql
+chown -R mysql:mysql /var/log/mysql
+
+# 3. Konfigurasi MariaDB Master (bind-address, server-id, binary logging)
+cat << 'EOF' > /etc/mysql/mariadb.conf.d/50-server.cnf
+[server]
+
+[mysqld]
+user                    = mysql
+pid-file                = /run/mysqld/mysqld.pid
+basedir                 = /usr
+datadir                 = /var/lib/mysql
+tmpdir                  = /tmp
+lc-messages-dir         = /usr/share/mysql
+
+# Buka akses agar mendengarkan di seluruh interface jaringan
+bind-address            = 0.0.0.0
+
+# Konfigurasi Binary Logging untuk Replikasi Master
+server-id               = 1
+log-bin                 = mariadb-bin
+binlog_format           = ROW
+binlog_do_db            = db_shibuya_k59
+EOF
+
+# 4. Restart layanan MariaDB
+service mariadb restart
+service mariadb status
+
+# 5. Inisialisasi Database, Tabel, dan User Privilege
+mariadb -u root << 'EOF'
+CREATE DATABASE IF NOT EXISTS db_shibuya_k59;
+
+USE db_shibuya_k59;
+
+CREATE TABLE IF NOT EXISTS request_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    worker_name VARCHAR(50) NOT NULL,
+    client_ip VARCHAR(50) NOT NULL,
+    proxy_ip VARCHAR(50) NOT NULL,
+    user_agent TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- User untuk replikasi Slave (inumaki)
+CREATE USER IF NOT EXISTS 'replica'@'%' IDENTIFIED BY 'password_replica';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'replica'@'%';
+
+-- User aplikasi untuk seluruh node di Network 4 (10.93.4.%)
+CREATE USER IF NOT EXISTS 'jujutsu_user'@'10.93.4.%' IDENTIFIED BY 'password123';
+GRANT ALL PRIVILEGES ON db_shibuya_k59.* TO 'jujutsu_user'@'10.93.4.%';
+CREATE USER IF NOT EXISTS 'jujutsu_user'@'%' IDENTIFIED BY 'password123';
+GRANT ALL PRIVILEGES ON db_shibuya_k59.* TO 'jujutsu_user'@'%';
+
+FLUSH PRIVILEGES;
+EOF
+
+echo "Konfigurasi DB Master yaga selesai."
+mariadb -u root -e "SHOW MASTER STATUS\G"
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal13.sh
+/root/soal13.sh
+```
+
+---
+
+#### 2. Pada Node `inumaki` (DB Slave)
+
+Buka terminal node **`inumaki`**, buat file `/root/soal13.sh`:
+
+```bash
+nano /root/soal13.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Atur IP statis inumaki dan nameserver untuk instalasi paket
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.4.9/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi paket MariaDB Server & Client
+apt-get update -y
+apt-get install -y mariadb-server mariadb-client
+
+# 3. Konfigurasi MariaDB Slave (bind-address, server-id)
+cat << 'EOF' > /etc/mysql/mariadb.conf.d/50-server.cnf
+[server]
+
+[mysqld]
+user                    = mysql
+pid-file                = /run/mysqld/mysqld.pid
+basedir                 = /usr
+datadir                 = /var/lib/mysql
+tmpdir                  = /tmp
+lc-messages-dir         = /usr/share/mysql
+
+bind-address            = 0.0.0.0
+
+# Konfigurasi Replikasi Slave
+server-id               = 2
+replicate_do_db         = db_shibuya_k59
+EOF
+
+# 4. Restart layanan MariaDB
+service mariadb restart
+service mariadb status
+
+# 5. Ambil posisi log dari Master yaga (10.93.4.8) secara otomatis
+echo "Mengambil status binlog dari Master yaga (10.93.4.8)..."
+MASTER_STATUS=$(mariadb -h 10.93.4.8 -u replica -ppassword_replica -e "SHOW MASTER STATUS\G" 2>/dev/null)
+LOG_FILE=$(echo "$MASTER_STATUS" | grep -i "File:" | awk '{print $2}')
+LOG_POS=$(echo "$MASTER_STATUS" | grep -i "Position:" | awk '{print $2}')
+
+if [ -z "$LOG_FILE" ] || [ -z "$LOG_POS" ]; then
+    echo "Peringatan: Gagal mengambil binlog otomatis. Menggunakan default posisi awal."
+    LOG_FILE="mariadb-bin.000001"
+    LOG_POS=4
+fi
+
+echo "Master Log File: $LOG_FILE"
+echo "Master Log Position: $LOG_POS"
+
+# 6. Hubungkan Slave ke Master yaga
+mariadb -u root << EOF
+STOP SLAVE;
+CHANGE MASTER TO
+    MASTER_HOST='10.93.4.8',
+    MASTER_USER='replica',
+    MASTER_PASSWORD='password_replica',
+    MASTER_PORT=3306,
+    MASTER_LOG_FILE='$LOG_FILE',
+    MASTER_LOG_POS=$LOG_POS,
+    MASTER_CONNECT_RETRY=10;
+START SLAVE;
+EOF
+
+echo "Konfigurasi DB Slave inumaki selesai."
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal13.sh
+/root/soal13.sh
+```
+
+---
+
+### Script Testing (Pembuktian Replikasi)
+
+#### 1. Pada Node `inumaki` (Cek Status Slave)
+
+Buka terminal node **`inumaki`**, buat file `/root/soal13_testing.sh`:
+
+```bash
+nano /root/soal13_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 13: NODE inumaki (Status Replikasi Slave)"
+
+echo -e "\n[1] Pengecekan Status Replikasi (Slave_IO & Slave_SQL):"
+mariadb -u root -e "SHOW SLAVE STATUS\G" | grep -E "Slave_IO_Running|Slave_SQL_Running|Seconds_Behind_Master|Last_IO_Error|Last_SQL_Error"
+
+echo -e "\n[2] Isi Tabel request_logs Saat Ini pada inumaki (Slave):"
+mariadb -u root -e "SELECT * FROM db_shibuya_k59.request_logs;" 2>/dev/null || echo "Tabel belum ada atau belum tersinkronisasi."
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal13_testing.sh
+/root/soal13_testing.sh
+```
+
+---
+
+#### 2. Pada Node `yaga` (Uji Penambahan Data di Master)
+
+Buka terminal node **`yaga`**, buat file `/root/soal13_testing.sh`:
+
+```bash
+nano /root/soal13_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 13: NODE yaga (Penambahan Data di Master)"
+
+echo -e "\n[1] Menambahkan Data Log Uji Coba ke Master (yaga):"
+mariadb -u root db_shibuya_k59 << 'EOF'
+INSERT INTO request_logs (worker_name, client_ip, proxy_ip, user_agent)
+VALUES ('yaga_master_test', '10.93.2.11', '10.93.1.4', 'Testing MariaDB Master-Slave Shibuya');
+EOF
+
+echo "Data berhasil dimasukkan ke Master."
+
+echo -e "\n[2] Isi Tabel request_logs pada yaga (Master):"
+mariadb -u root -e "SELECT * FROM db_shibuya_k59.request_logs;"
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal13_testing.sh
+/root/soal13_testing.sh
+```
+
+---
+
+#### 3. Verifikasi Akhir pada `inumaki` (Slave)
+
+Setelah data berhasil ditambahkan di `yaga`, jalankan kembali script testing di terminal **`inumaki`**:
+
+```bash
+/root/soal13_testing.sh
+```
+
+**Kriteria keberhasilan:**
+1. `Slave_IO_Running: Yes` dan `Slave_SQL_Running: Yes`.
+2. Data baris `'yaga_master_test'` yang baru dimasukkan di `yaga` langsung muncul di tabel `request_logs` milik `inumaki`.
  
  ---
 
 ## Soal 14
 ### Perintah soal
+Menyiapkan klaster backend worker di Data Center (Network 4) dengan kontrol akses ketat:
+1. **Worker Frontend (`maki` - `10.93.4.3`, `panda` - `10.93.4.4`):** Memasang Nginx dan PHP-FPM untuk menyajikan web frontend yang menampilkan hostname masing-masing. Akses dibatasi hanya menerima trafik dari public reverse proxy `gojo` (`10.93.1.4`), sedangkan akses langsung dari luar ditolak.
+2. **Worker API (`nanami` - `10.93.4.5`, `todo` - `10.93.4.6`, `kirara` - `10.93.4.7`):** Memasang Nginx, PHP-FPM, dan driver `php-mysqli` untuk melayani API yang secara otomatis mencatat log request ke database `yaga` (`10.93.4.8`). Akses dibatasi hanya menerima trafik dari internal load balancer `geto` (`10.93.4.2`).
+3. **Validasi & Pembuktian:** Membuktikan bahwa akses HTTP langsung dari klien (`itadori`) ke IP worker menghasilkan error `403 Forbidden`, sedangkan akses dari jalur proxy yang ditentukan berhasil memperoleh respons `200 OK`.
 
-### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
+---
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`maki` & `panda`** | `/root/soal14.sh` | Konfigurasi IP statis, instalasi Nginx & PHP-FPM, script web frontend penampil hostname, dan restriksi akses (hanya allow `10.93.1.4`) |
+| **`nanami`, `todo`, `kirara`** | `/root/soal14.sh` | Konfigurasi IP statis, instalasi Nginx, PHP-FPM & `php-mysqli`, script API pencatat log ke DB `yaga`, dan restriksi akses (hanya allow `10.93.4.2`) |
+| **Klien (`itadori`)** | `/root/soal14_testing.sh` | Pengujian akses langsung dari klien ke worker frontend & API untuk membuktikan respons ditolak (`403 Forbidden`) |
+| **`gojo` & `geto`** | `/root/soal14_testing.sh` | Pengujian akses dari proxy resmi untuk membuktikan respons diizinkan (`200 OK`) |
+
+---
+
+### Langkah Pengerjaan
+
+#### 1. Pada Node Worker Frontend (`maki` & `panda`)
+
+Buka terminal node **`maki`** atau **`panda`**, buat file `/root/soal14.sh`:
+
+```bash
+nano /root/soal14.sh
+```
+
+Isikan script berikut (script akan otomatis menyesuaikan IP berdasarkan hostname):
+
+```bash
+#!/bin/bash
+NODE_NAME="$(hostname)"
+
+# 1. Atur IP statis berdasarkan hostname
+case "$NODE_NAME" in
+    maki)
+        NODE_IP="10.93.4.3"
+        ;;
+    panda)
+        NODE_IP="10.93.4.4"
+        ;;
+    *)
+        echo "Nama node tidak dikenal: $NODE_NAME"
+        exit 1
+        ;;
+esac
+
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add ${NODE_IP}/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi Nginx dan PHP-FPM
+apt-get update -y
+apt-get install -y nginx php-fpm
+
+# 3. Deteksi versi PHP dan pastikan socket PHP-FPM aktif
+PHP_VERSION=$(php -v 2>/dev/null | head -n 1 | cut -d " " -f 2 | cut -d "." -f 1,2)
+[ -z "$PHP_VERSION" ] && PHP_VERSION="8.4"
+PHP_SOCK="/run/php/php${PHP_VERSION}-fpm.sock"
+
+service "php${PHP_VERSION}-fpm" start 2>/dev/null || service php-fpm start 2>/dev/null
+
+# 4. Buat Script Web Frontend
+cat << 'EOF' > /var/www/html/index.php
+<?php
+$hostname = gethostname();
+echo "Hello from Frontend Worker: " . $hostname . "\n";
+?>
+EOF
+chown -R www-data:www-data /var/www/html
+
+# 5. Konfigurasi Virtual Host Nginx dengan Access Restriction
+# Hanya mengizinkan akses dari gojo (10.93.1.4) dan localhost
+cat << EOF > /etc/nginx/sites-available/default
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    root /var/www/html;
+    index index.php index.html;
+    server_name jujutsu.k59.com www.jujutsu.k59.com _;
+
+    # Access Control: Hanya izinkan proxy gojo (10.93.1.4)
+    allow 10.93.1.4;
+    allow 127.0.0.1;
+    deny all;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:${PHP_SOCK};
+    }
+}
+EOF
+
+# 6. Validasi dan jalankan service
+nginx -t
+service nginx restart
+service "php${PHP_VERSION}-fpm" restart 2>/dev/null || service php-fpm restart 2>/dev/null
+echo "Setup Frontend Worker $NODE_NAME (${NODE_IP}) selesai."
+```
+
+Beri izin eksekusi dan jalankan pada **`maki`** dan **`panda`**:
+
+```bash
+chmod +x /root/soal14.sh
+bash /root/soal14.sh
+```
+
+---
+
+#### 2. Pada Node Worker API (`nanami`, `todo`, `kirara`)
+
+Buka terminal node **`nanami`**, **`todo`**, atau **`kirara`**, buat file `/root/soal14.sh`:
+
+```bash
+nano /root/soal14.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+NODE_NAME="$(hostname)"
+
+# 1. Atur IP statis berdasarkan hostname
+case "$NODE_NAME" in
+    nanami)
+        NODE_IP="10.93.4.5"
+        ;;
+    todo)
+        NODE_IP="10.93.4.6"
+        ;;
+    kirara)
+        NODE_IP="10.93.4.7"
+        ;;
+    *)
+        echo "Nama node tidak dikenal: $NODE_NAME"
+        exit 1
+        ;;
+esac
+
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add ${NODE_IP}/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi Nginx, PHP-FPM, php-mysqli, dan mariadb-client
+apt-get update -y
+apt-get install -y nginx php-fpm php-mysqli mariadb-client
+
+# 3. Deteksi versi PHP dan pastikan socket PHP-FPM aktif
+PHP_VERSION=$(php -v 2>/dev/null | head -n 1 | cut -d " " -f 2 | cut -d "." -f 1,2)
+[ -z "$PHP_VERSION" ] && PHP_VERSION="8.4"
+PHP_SOCK="/run/php/php${PHP_VERSION}-fpm.sock"
+
+service "php${PHP_VERSION}-fpm" start 2>/dev/null || service php-fpm start 2>/dev/null
+
+# 4. Buat Script API yang mencatat log request ke Database yaga (10.93.4.8)
+cat << 'EOF' > /var/www/html/index.php
+<?php
+header('Content-Type: application/json; charset=utf-8');
+
+$worker = gethostname();
+$client_ip = isset($_SERVER['HTTP_X_REAL_IP']) ? $_SERVER['HTTP_X_REAL_IP'] : 
+             (isset($_SERVER['HTTP_X_FORWARDED_FOR']) ? $_SERVER['HTTP_X_FORWARDED_FOR'] : $_SERVER['REMOTE_ADDR']);
+$proxy_ip = $_SERVER['REMOTE_ADDR'];
+$user_agent = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : 'Unknown';
+
+$conn = new mysqli('10.93.4.8', 'jujutsu_user', 'password123', 'db_shibuya_k59');
+if ($conn->connect_error) {
+    http_response_code(500);
+    echo json_encode(["status" => "error", "message" => "Database connection failed"]);
+    exit;
+}
+
+$stmt = $conn->prepare("INSERT INTO request_logs (worker_name, client_ip, proxy_ip, user_agent) VALUES (?, ?, ?, ?)");
+if ($stmt) {
+    $stmt->bind_param("ssss", $worker, $client_ip, $proxy_ip, $user_agent);
+    $stmt->execute();
+    $stmt->close();
+}
+$conn->close();
+
+echo json_encode([
+    "status" => "success",
+    "worker" => $worker,
+    "client_ip" => $client_ip,
+    "proxy_ip" => $proxy_ip,
+    "message" => "Request logged successfully to yaga"
+]) . "\n";
+?>
+EOF
+chown -R www-data:www-data /var/www/html
+
+# 5. Konfigurasi Virtual Host Nginx dengan Access Restriction
+# Hanya mengizinkan akses dari load balancer geto (10.93.4.2) dan localhost
+cat << EOF > /etc/nginx/sites-available/default
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    root /var/www/html;
+    index index.php index.html;
+    server_name jujutsu.k59.com www.jujutsu.k59.com _;
+
+    # Access Control: Hanya izinkan internal load balancer geto (10.93.4.2)
+    allow 10.93.4.2;
+    allow 127.0.0.1;
+    deny all;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:${PHP_SOCK};
+    }
+}
+EOF
+
+# 6. Validasi dan jalankan service
+nginx -t
+service nginx restart
+service "php${PHP_VERSION}-fpm" restart 2>/dev/null || service php-fpm restart 2>/dev/null
+echo "Setup API Worker $NODE_NAME (${NODE_IP}) selesai."
+```
+
+Beri izin eksekusi dan jalankan pada **`nanami`**, **`todo`**, dan **`kirara`**:
+
+```bash
+chmod +x /root/soal14.sh
+/root/soal14.sh
+```
+
+---
+
+### Script Testing (Pembuktian Sesuai Soal)
+
+#### 1. Uji Akses Langsung dari Klien (`itadori`) -> HARUS DITOLAK (403 Forbidden)
+
+Buka terminal klien **`itadori`**, buat file `/root/soal14_testing.sh`:
+
+```bash
+nano /root/soal14_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 14: KLIEN itadori (Uji Akses Langsung ke Worker)"
+
+echo -e "\n[1] Akses Langsung ke Frontend Worker maki (10.93.4.3):"
+curl -I http://10.93.4.3/ | head -n 5
+
+echo -e "\n[2] Akses Langsung ke Frontend Worker panda (10.93.4.4):"
+curl -I http://10.93.4.4/ | head -n 5
+
+echo -e "\n[3] Akses Langsung ke API Worker nanami (10.93.4.5):"
+curl -I http://10.93.4.5/ | head -n 5
+
+echo -e "\n[4] Akses Langsung ke API Worker todo (10.93.4.6):"
+curl -I http://10.93.4.6/ | head -n 5
+
+echo -e "\n[5] Akses Langsung ke API Worker kirara (10.93.4.7):"
+curl -I http://10.93.4.7/ | head -n 5
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal14_testing.sh
+/root/soal14_testing.sh
+```
+
+*(Kriteria sukses: Seluruh request langsung dari klien harus menampilkan status **`HTTP/1.1 403 Forbidden`**).*
+
+![alt text](assets/soal14_1.png)
+---
+
+#### 2. Uji Akses Melalui Jalur Proxy Resmi -> HARUS DISETUJUI (200 OK)
+
+**A. Dari node `gojo` (`10.93.1.4`) ke Frontend Worker:**  
+Buka terminal **`gojo`**, jalankan:
+```bash
+echo -e "\n=== UJI AKSES GOJO -> MAKI ==="
+curl http://10.93.4.3/
+
+echo -e "\n=== UJI AKSES GOJO -> PANDA ==="
+curl http://10.93.4.4/
+```
+*(Kriteria sukses: Menampilkan respons `Hello from Frontend Worker: maki` dan `Hello from Frontend Worker: panda` dengan status HTTP 200).*
+
+![alt text](assets/soal14_2.png)
+
+**B. Dari node `geto` (`10.93.4.2`) ke API Worker:**  
+Buka terminal **`geto`**, pastikan IP `10.93.4.2` terpasang lalu jalankan:
+```bash
+ip addr add 10.93.4.2/24 dev eth0 2>/dev/null; ip link set eth0 up
+
+echo -e "\n=== UJI AKSES GETO -> NANAMI ==="
+curl http://10.93.4.5/
+
+echo -e "\n=== UJI AKSES GETO -> TODO ==="
+curl http://10.93.4.6/
+
+echo -e "\n=== UJI AKSES GETO -> KIRARA ==="
+curl http://10.93.4.7/
+```
+*(Kriteria sukses: Menampilkan respons JSON status success dari masing-masing worker dan data log tersimpan di database `yaga`).*
  
+![alt text](assets/soal14_3.png)
+
  ---
 
 ## Soal 15
 ### Perintah soal
+Mengonfigurasi Nginx pada `geto` (`10.93.4.2`) sebagai Internal Load Balancer untuk mengendalikan pembagian beban request API di Data Center:
+1. **Upstream Cluster:** Membuat grup upstream `api_cluster` yang beranggotakan worker API utama: `nanami` (`10.93.4.5:80`) dan `todo` (`10.93.4.6:80`).
+2. **Algoritma Weighted Round Robin (3:1):** Menerapkan parameter `weight=3` untuk `nanami` dan `weight=1` untuk `todo`, sehingga `nanami` menerima porsi beban 3 kali lebih banyak (75%) dibanding `todo` (25%).
+3. **Validasi & Pembuktian:** Melakukan loop request berulang kali (40 kali) ke `geto` dari jaringan lokal Data Center, lalu menghitung distribusi respons untuk membuktikan rasio beban 3:1 antara `nanami` dan `todo`.
 
-### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
+---
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`geto`** | `/root/soal15.sh` | Konfigurasi IP statis, instalasi Nginx, pembuatan vhost load balancer dengan upstream `api_cluster` berbobot 3:1, dan reload Nginx |
+| **`geto` / `tengen`** | `/root/soal15_testing.sh` | Mengirimkan 40 request secara beruntun ke `http://10.93.4.2/` dan menghitung rasio distribusi respons dari `nanami` vs `todo` |
+
+---
+
+### Langkah Pengerjaan
+
+#### Pada Node `geto` (Internal Load Balancer)
+
+Buka terminal node **`geto`**, buat file `/root/soal15.sh`:
+
+```bash
+nano /root/soal15.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Atur IP statis geto dan nameserver untuk instalasi paket
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.4.2/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi Nginx dan curl
+apt-get update -y
+apt-get install -y nginx curl
+
+# 3. Konfigurasi Upstream Weighted Round Robin 3:1
+cat << 'EOF' > /etc/nginx/sites-available/load-balancer.conf
+upstream api_cluster {
+    server 10.93.4.5:80 weight=3; # nanami (menerima 3 dari setiap 4 request)
+    server 10.93.4.6:80 weight=1; # todo   (menerima 1 dari setiap 4 request)
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+# 4. Aktifkan konfigurasi load balancer dan nonaktifkan default site
+ln -sf /etc/nginx/sites-available/load-balancer.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# 5. Validasi sintaks dan jalankan service
+nginx -t
+service nginx restart
+service nginx status
+
+echo "Konfigurasi Load Balancer geto selesai."
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal15.sh
+/root/soal15.sh
+```
+
+---
+
+### Script Testing (Pembuktian Rasio Beban 3:1)
+
+Buka terminal node **`geto`** (atau node lokal Network 4 seperti **`tengen`**), buat file `/root/soal15_testing.sh`:
+
+```bash
+nano /root/soal15_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 15: Uji Distribusi Beban Weighted Round Robin (3:1)"
+echo "Mengirimkan 40 request secara berurutan ke geto (10.93.4.2)..."
+
+for i in $(seq 1 40); do
+    curl -s http://10.93.4.2/ | grep -o '"worker":"[^"]*"' | cut -d '"' -f 4
+done | sort | uniq -c
+
+echo -e "\nTarget Distribusi yang Diharapkan (Rasio 3:1):"
+echo "  30 nanami (75%)"
+echo "  10 todo   (25%)"
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal15_testing.sh
+/root/soal15_testing.sh
+```
+
+![alt text](assets/soal15_1.png)<br>
+
  ---
 
 ## Soal 16
 ### Perintah soal
+Mengonfigurasi Nginx pada node `gojo` (`10.93.1.4`) sebagai Public Reverse Proxy di perbatasan DMZ:
+1. **Domain Virtual Host:** Melayani domain resmi `jujutsu.k59.com` dan alias `www.jujutsu.k59.com`.
+2. **Path-Based Routing:**
+   - **Root Path (`/`):** Meneruskan lalu lintas web utama secara Round Robin ke frontend worker (`maki` - `10.93.4.3:80` dan `panda` - `10.93.4.4:80`).
+   - **API Path (`/api`):** Meneruskan request API langsung ke internal load balancer `geto` (`10.93.4.2:80`).
+3. **Validasi & Pembuktian:** Menguji dari klien Divisi A (`itadori`) bahwa akses root (`/`) dijawab bergantian oleh `maki` dan `panda`, sedangkan endpoint `/api` dijawab oleh `nanami` atau `todo` via `geto`.
 
-### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
- ---
+---
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`gojo`** | `/root/soal16.sh` | Konfigurasi IP statis, instalasi Nginx, pengaturan upstream, Path-Based Routing (`/` dan `/api`), serta reload Nginx |
+| **`itadori`** | `/root/soal16_testing.sh` | Menguji akses web root (`/`) dan endpoint `/api` dari klien menggunakan domain resmi |
+
+---
+
+### Langkah Pengerjaan
+
+#### Pada Node `gojo` (Public Reverse Proxy)
+
+Buka terminal node **`gojo`**, buat file `/root/soal16.sh`:
+
+```bash
+nano /root/soal16.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Atur IP statis gojo dan nameserver untuk instalasi paket
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.1.4/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.1.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Instalasi Nginx dan curl
+apt-get update -y
+apt-get install -y nginx curl
+
+# 3. Konfigurasi Upstream dan Path-Based Routing
+cat << 'EOF' > /etc/nginx/sites-available/gojo-proxy.conf
+# Upstream ke Frontend Worker (Round Robin)
+upstream frontend_cluster {
+    server 10.93.4.3:80; # maki
+    server 10.93.4.4:80; # panda
+}
+
+# Upstream ke Internal Load Balancer
+upstream api_gateway {
+    server 10.93.4.2:80; # geto
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name jujutsu.k59.com www.jujutsu.k59.com _;
+
+    # Routing ke API Cluster melalui geto
+    location /api {
+        proxy_pass http://api_gateway/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Routing ke Frontend Worker
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+# 4. Aktifkan konfigurasi proxy dan nonaktifkan default site
+ln -sf /etc/nginx/sites-available/gojo-proxy.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# 5. Validasi sintaks dan jalankan service
+nginx -t
+service nginx restart
+service nginx status
+
+echo "Konfigurasi Public Reverse Proxy gojo selesai."
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal16.sh
+/root/soal16.sh
+```
+
+---
+
+### Script Testing Pembuktian
+
+Buka terminal klien **`itadori`**, buat file `/root/soal16_testing.sh`:
+
+```bash
+nano /root/soal16_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 16: KLIEN $(hostname) (Uji Path-Based Routing)"
+
+# Pastikan nameserver mengarah ke DNS Master (utahime)
+echo "nameserver 10.93.1.2" > /etc/resolv.conf
+
+echo -e "\n[1] Akses Web Utama Root (/) - Target: maki / panda bergantian:"
+for i in {1..4}; do
+    echo -n "Request $i: "
+    curl -s http://jujutsu.k59.com/
+done
+
+echo -e "\n[2] Akses Endpoint API (/api) - Target: nanami / todo via geto:"
+for i in {1..4}; do
+    echo -n "Request $i: "
+    curl -s http://jujutsu.k59.com/api | grep -o '"worker":"[^"]*"'
+done
+```
+
+Beri izin eksekusi dan jalankan di **`itadori`**:
+
+```bash
+chmod +x /root/soal16_testing.sh
+/root/soal16_testing.sh
+```
+
+![alt text](assets/soal16_1.png)
+
+---
 
 ## Soal 17
 ### Perintah soal
+Meneruskan dan memvalidasi alamat IP asli klien melalui rantai reverse proxy tanpa tertukar dengan IP proxy perantara:
+1. **Forwarding Header pada `gojo` (`10.93.1.4`):** Mengonfigurasi Nginx agar meneruskan alamat IP asal klien menggunakan header `X-Real-IP` dan `X-Forwarded-For` saat me-route request ke path `/api`.
+2. **Trusted Proxy pada `geto` (`10.93.4.2`):** Menggunakan Nginx `http_realip_module` (`set_real_ip_from 10.93.1.4; real_ip_header X-Forwarded-For; real_ip_recursive on;`) agar `geto` hanya memercayai header IP yang diteruskan oleh reverse proxy terpercaya (`gojo`), lalu meneruskan IP klien yang sudah terverifikasi ke cluster worker API (`nanami`, `todo`, `kirara`).
+3. **Pencatatan ke Database `yaga`:** Skrip API pada worker backend menyimpan alamat klien yang telah divalidasi ke kolom `client_ip` pada tabel `request_logs` di database `db_shibuya_k59`.
+4. **Validasi & Pembuktian:** Mengirimkan request ke endpoint `/api` dari klien Network 2 (`itadori`) dan Network 3 (`kugisaki`), kemudian memeriksa tabel database di `yaga` untuk membuktikan bahwa kolom `client_ip` mencatat alamat IP asli klien (bukan IP `gojo` `10.93.1.4` maupun IP `geto` `10.93.4.2`).
 
-### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
- ---
+---
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`gojo`** | `/root/soal17.sh` | Konfigurasi vhost reverse proxy dengan header `X-Real-IP` dan `X-Forwarded-For` |
+| **`geto`** | `/root/soal17.sh` | Konfigurasi trusted proxy `set_real_ip_from 10.93.1.4` dan penerusan real IP ke worker API |
+| **Klien (`itadori`, `kugisaki`)** | `/root/soal17_testing.sh` | Mengirimkan HTTP request dari Network 2 dan Network 3 ke endpoint `http://jujutsu.k59.com/api` |
+| **Database (`yaga`)** | `/root/soal17_testing.sh` | Menampilkan 5 record data log terbaru pada tabel `request_logs` untuk verifikasi kolom `client_ip` |
+
+---
+
+### Langkah Pengerjaan
+
+#### 1. Pada Node `gojo` (Public Reverse Proxy)
+
+Buka terminal node **`gojo`**, buat file `/root/soal17.sh`:
+
+```bash
+nano /root/soal17.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Pastikan IP statis dan default gateway
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.1.4/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.1.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Konfigurasi Vhost Reverse Proxy dengan header Real IP
+cat << 'EOF' > /etc/nginx/sites-available/gojo-proxy.conf
+upstream frontend_cluster {
+    server 10.93.4.3:80; # maki
+    server 10.93.4.4:80; # panda
+}
+
+upstream api_gateway {
+    server 10.93.4.2:80; # geto
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name jujutsu.k59.com www.jujutsu.k59.com _;
+
+    # Routing ke API Cluster melalui geto dengan header Real IP klien
+    location /api {
+        proxy_pass http://api_gateway/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Routing ke Frontend Worker
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/gojo-proxy.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# 3. Validasi dan reload service
+nginx -t
+service nginx restart
+service nginx status
+
+echo "Konfigurasi Real IP Header pada gojo selesai."
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal17.sh
+/root/soal17.sh
+```
+
+---
+
+#### 2. Pada Node `geto` (Internal Load Balancer)
+
+Buka terminal node **`geto`**, buat file `/root/soal17.sh`:
+
+```bash
+nano /root/soal17.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+
+# 1. Pastikan IP statis dan default gateway
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.4.2/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 2. Konfigurasi Trusted Proxy (Hanya percaya gojo: 10.93.1.4)
+cat << 'EOF' > /etc/nginx/sites-available/load-balancer.conf
+upstream api_cluster {
+    server 10.93.4.5:80 weight=3; # nanami (75%)
+    server 10.93.4.6:80 weight=1; # todo   (25%)
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    # Keamanan Real IP: Hanya percaya header yang diteruskan oleh gojo (10.93.1.4)
+    set_real_ip_from 10.93.1.4;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        # $remote_addr sekarang otomatis merupakan real client IP yang telah divalidasi
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/load-balancer.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# 3. Validasi dan reload service
+nginx -t
+service nginx restart
+service nginx status
+
+echo "Konfigurasi Trusted Proxy pada geto selesai."
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal17.sh
+/root/soal17.sh
+```
+
+---
+
+### Script Testing Pembuktian
+
+#### 1. Pada Klien Network 2 (`itadori`) dan Network 3 (`kugisaki`)
+
+Buka terminal klien **`itadori`** atau **`kugisaki`**, buat file `/root/soal17_testing.sh`:
+
+```bash
+nano /root/soal17_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 17: KLIEN $(hostname)"
+echo "Mengirim request ke API (http://jujutsu.k59.com/api)..."
+
+# Pastikan DNS mengarah ke DNS Master (utahime)
+echo "nameserver 10.93.1.2" > /etc/resolv.conf
+
+curl -s http://jujutsu.k59.com/api
+echo ""
+```
+
+Beri izin eksekusi dan jalankan:
+
+```bash
+chmod +x /root/soal17_testing.sh
+/root/soal17_testing.sh
+```
+
+---
+
+#### 2. Pada Database Master (`yaga`)
+
+Buka terminal node **`yaga`**, buat file `/root/soal17_testing.sh`:
+
+```bash
+nano /root/soal17_testing.sh
+```
+
+Isikan script berikut:
+
+```bash
+#!/bin/bash
+echo "TESTING SOAL 17: PENGECEKAN TABEL DATABASE PADA yaga"
+echo "Menampilkan 5 record request_logs terbaru:"
+
+mariadb -u root << 'EOF'
+USE db_shibuya_k59;
+SELECT id, worker_name, client_ip, proxy_ip, created_at FROM request_logs ORDER BY id DESC LIMIT 5;
+EOF
+```
+
+Beri izin eksekusi dan jalankan di **`yaga`**:
+
+```bash
+chmod +x /root/soal17_testing.sh
+/root/soal17_testing.sh
+```
+
+*(Kriteria sukses: Kolom `client_ip` terisi IP asli klien asal, misalnya `10.93.2.11` dari `itadori` atau `10.93.3.99` dari `kugisaki`, bukan IP `gojo` `10.93.1.4` dan bukan IP `geto` `10.93.4.2`).*
 
 ## Soal 18
 ### Perintah soal
