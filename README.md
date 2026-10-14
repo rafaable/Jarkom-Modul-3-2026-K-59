@@ -1311,8 +1311,9 @@ Melakukan verifikasi menyeluruh terhadap konfigurasi jaringan pada seluruh klien
 3. Verifikasi DNS Resolver: Memastikan file /etc/resolv.conf mencatat nameserver 10.93.1.2, 10.93.1.3 serta domain search k59.com.
 4. Pencocokan Lease Server: Memeriksa log pada /var/lib/dhcp/dhcpd.leases di node tengen untuk memastikan tidak ada IP ganda dan seluruh alokasi pool berjalan sesuai skema.
 
-| Node |	File Script	|Fungsi |
-| Klien (Semua Node)|	/root/soal7_testing.sh |	Memverifikasi IP, route, dan konfigurasi resolv.conf pada klien |
+| Node |	File Script	| Fungsi |
+| --- | --- | --- |
+| Klien (Semua Node) |	/root/soal7_testing.sh |	Memverifikasi IP, route, dan konfigurasi resolv.conf pada klien |
 | tengen |	/root/soal7_testing.sh |	Memeriksa rekam jejak penyewaan IP pada file dhcpd.leases |
 
 
@@ -1377,7 +1378,9 @@ Melakukan pemantauan dan analisis lalu lintas paket DHCP menggunakan tcpdump unt
 - Gateway-IP / giaddr (Alamat IP router relay yang meneruskan paket).
 
 Penempatan Script pada Node
+
 | Node | File Script | Fungsi |
+| --- | --- | --- |
 | tengen | /root/soal8.sh | Menginstal tcpdump dan menangkap lalu lintas DHCP port 67/68 |
 | Klien (itadori) | - | Memicu DHCP request via udhcpc -i eth0 -n -q| 
   
