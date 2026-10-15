@@ -4075,6 +4075,4 @@ Di `gojo`:
 
 <img width="1106" height="836" alt="image" src="https://github.com/user-attachments/assets/96c79a26-d7b7-4225-ae64-3dc1a3687aab" />
 
-   ini script
-   ```
- 
+   
