@@ -3678,8 +3678,6 @@ chmod +x /root/soal18_testing.sh
 
 Hasil kondisi normal: request dilayani `nanami` dan `todo` (rasio kira-kira 3:1), `kirara` tidak muncul.
 
-![alt text](assets/soal18_1.png)
-
 #### 4. Simulasi gangguan
 Di **`nanami`** dan **`todo`**:
 
@@ -3696,7 +3694,6 @@ Port 80 tidak lagi listen. Lalu di `itadori`:
 
 Hasil: seluruh request `HTTP=200` dengan `"worker":"kirara"`, tanpa `502 Bad Gateway`. Request pertama sedikit lebih lambat (sampai `proxy_connect_timeout` 2 detik) karena `geto` mencoba server utama terlebih dahulu.
 
-![alt text](assets/soal18_2.png)
 
 #### 5. Bukti di database `yaga`
 
@@ -3706,7 +3703,6 @@ mariadb -u root -e "SELECT worker_name, COUNT(*) AS total FROM db_shibuya_k59.re
 
 Baris `kirara` muncul dengan total bertambah, membuktikan request saat gangguan benar-benar diproses oleh worker cadangan.
 
-![alt text](assets/soal18_3.png)
 
 #### 6. Pemulihan
 Di `nanami` dan `todo`:
@@ -4016,7 +4012,6 @@ Di `gojo`:
 /root/soal20_log.sh
 ```
 
-![alt text](assets/soal20_1.png)
 
 #### 4. Skenario B: `/api` tanpa rate limit
 
@@ -4038,7 +4033,6 @@ Di `gojo`:
 /root/soal20_log.sh
 ```
 
-![alt text](assets/soal20_2.png)
 
 #### 5. Skenario C: `/api` dengan rate limit aktif
 
@@ -4060,7 +4054,6 @@ Di `gojo`:
 /root/soal20_log.sh
 ```
 
-![alt text](assets/soal20_3.png)
 
 #### 6. Tabel perbandingan
 
