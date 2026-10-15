@@ -3560,65 +3560,528 @@ chmod +x /root/soal17_testing.sh
 
 ## Soal 18
 ### Perintah soal
+`nanami` dan `todo` merupakan worker API utama, sedangkan `kirara` disiapkan sebagai worker cadangan:
+1. Konfigurasikan upstream `api_cluster` pada `geto` agar `kirara` menjadi **backup server**.
+2. Terapkan **passive health check** dengan parameter `max_fails=2` dan `fail_timeout=5s` pada worker API utama.
+3. Pastikan `kirara` menjalankan layanan API yang kompatibel dengan endpoint utama.
+4. Simulasikan gangguan dengan menghentikan Nginx atau layanan API pada `nanami` dan `todo`.
+5. Buktikan dari klien bahwa request ke `/api` dilayani oleh `kirara` dan menghasilkan respons API yang valid tanpa error `502 Bad Gateway`.
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`geto`** | `/root/soal18.sh` | Install Nginx, upstream `api_cluster` dengan `kirara` sebagai `backup`, `max_fails=2`, `fail_timeout=5s`, dan `proxy_next_upstream` |
+| **`nanami`, `todo`** | (command) | Simulasi gangguan: `pkill nginx`, lalu `nginx` untuk memulihkan |
+| **`itadori`** | `/root/soal18_testing.sh` | Mengirim 10 request ke `/api` sebelum dan saat gangguan |
+| **`yaga`** | (command) | Membuktikan log request dari worker `kirara` tercatat di database |
 
 ### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
+
+#### 1. Pastikan API `kirara` kompatibel
+`kirara` memakai script API yang sama dengan Soal 14 (akses hanya dari `geto`). Cek dari `geto`:
+
+```bash
+curl -s http://10.93.4.7/
+```
+
+Harus keluar JSON `"status":"success"` dengan `"worker":"kirara"`.
+
+#### 2. Konfigurasi upstream di `geto`
+
+```bash
+cat << 'EOS' > /root/soal18.sh
+#!/bin/bash
+
+# 1. IP, gateway, DNS, dan install Nginx
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.4.2/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+command -v nginx >/dev/null || {
+    apt-get update -y
+    apt-get install -y nginx curl
+}
+
+# 2. Upstream dengan kirara sebagai backup + passive health check
+cat << 'EOF' > /etc/nginx/sites-available/load-balancer.conf
+upstream api_cluster {
+    server 10.93.4.5:80 weight=3 max_fails=2 fail_timeout=5s; # nanami
+    server 10.93.4.6:80 weight=1 max_fails=2 fail_timeout=5s; # todo
+    server 10.93.4.7:80 backup;                               # kirara (cadangan)
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    # Trusted proxy (Soal 17)
+    set_real_ip_from 10.93.1.4;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_connect_timeout 2s;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 3;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/load-balancer.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# 3. Validasi, lalu start/reload
+nginx -t || exit 1
+if pgrep nginx >/dev/null; then nginx -s reload; else nginx; fi
+echo "Konfigurasi geto Soal 18 selesai."
+EOS
+chmod +x /root/soal18.sh
+/root/soal18.sh
+```
+
+Penjelasan:
+- `backup` membuat `kirara` hanya menerima request ketika semua server utama dianggap down.
+- `max_fails=2 fail_timeout=5s`: setelah gagal 2 kali, server ditandai down selama 5 detik, lalu dicoba lagi.
+- `proxy_next_upstream` meneruskan request yang gagal ke server lain, sehingga klien tidak menerima `502`.
+
+Verifikasi konfigurasi aktif:
+
+```bash
+nginx -T 2>/dev/null | grep -A4 "upstream api_cluster"
+```
+
+#### 3. Script testing di `itadori`
+
+```bash
+cat << 'EOF' > /root/soal18_testing.sh
+#!/bin/sh
+echo "TESTING SOAL 18: KLIEN $(hostname) - $1"
+
+for i in $(seq 1 10); do
+    R=$(curl -s -w " HTTP=%{http_code}" -H "Host: jujutsu.k59.com" http://10.93.1.4/api)
+    echo "Request $i: $R"
+done
+EOF
+chmod +x /root/soal18_testing.sh
+/root/soal18_testing.sh "KONDISI NORMAL"
+```
+
+Hasil kondisi normal: request dilayani `nanami` dan `todo` (rasio kira-kira 3:1), `kirara` tidak muncul.
+
+![alt text](assets/soal18_1.png)
+
+#### 4. Simulasi gangguan
+Di **`nanami`** dan **`todo`**:
+
+```bash
+pkill nginx
+ss -tlnp | grep :80
+```
+
+Port 80 tidak lagi listen. Lalu di `itadori`:
+
+```bash
+/root/soal18_testing.sh "NANAMI & TODO MATI"
+```
+
+Hasil: seluruh request `HTTP=200` dengan `"worker":"kirara"`, tanpa `502 Bad Gateway`. Request pertama sedikit lebih lambat (sampai `proxy_connect_timeout` 2 detik) karena `geto` mencoba server utama terlebih dahulu.
+
+![alt text](assets/soal18_2.png)
+
+#### 5. Bukti di database `yaga`
+
+```bash
+mariadb -u root -e "SELECT worker_name, COUNT(*) AS total FROM db_shibuya_k59.request_logs GROUP BY worker_name;"
+```
+
+Baris `kirara` muncul dengan total bertambah, membuktikan request saat gangguan benar-benar diproses oleh worker cadangan.
+
+![alt text](assets/soal18_3.png)
+
+#### 6. Pemulihan
+Di `nanami` dan `todo`:
+
+```bash
+nginx
+```
+
+Setelah `fail_timeout` (5 detik) lewat, trafik kembali ke `nanami` dan `todo`.
+
+### Gejala dan pemulihan yang ditemukan
+
+Sebelum pengujian, beberapa node kehilangan IP atau paketnya (node ter-reset). Penyebab dan perbaikannya:
+
+**1. `kirara` tidak bisa menulis log ke database (`HTTP 500`).**
+- Gejala: `curl http://10.93.4.7/` dari `geto` menghasilkan `500 Internal Server Error`; `ping 10.93.4.8` dari `kirara` menghasilkan `Destination Host Unreachable`.
+- Penyebab: `yaga` memegang IP `10.93.4.9` (IP milik `inumaki`) dan MariaDB belum terpasang.
+- Pemulihan (di `yaga`):
+  ```bash
+  ip addr flush dev eth0
+  ip addr add 10.93.4.8/24 dev eth0
+  ip link set eth0 up
+  ip route replace default via 10.93.4.1
+  bash /root/soal13.sh
+  ```
+
+**2. Nginx belum terpasang pada `nanami`, `todo`, dan `geto`.**
+- Gejala: `service nginx stop` menghasilkan `unrecognized service`; `soal18.sh` menghasilkan `nginx: command not found`.
+- Pemulihan: jalankan ulang `bash /root/soal14.sh` pada `nanami` dan `todo`, lalu jalankan `soal18.sh` pada `geto` (sudah menyertakan instalasi Nginx).
+- Catatan: karena `service nginx` tidak selalu tersedia, Nginx dimatikan dengan `pkill nginx` dan dinyalakan dengan `nginx`.
+
+<img width="1110" height="832" alt="image" src="https://github.com/user-attachments/assets/2b964eb2-e148-4d2b-a01e-ebb390c7df56" />
+
+<img width="1108" height="821" alt="image" src="https://github.com/user-attachments/assets/50de493e-cd0e-44da-9c17-05484662b2c1" />
+
+
  ---
 
 ## Soal 19
 ### Perintah soal
+`gojo` bertugas mengoptimalkan layanan web sekaligus membatasi request berlebihan:
+1. Konfigurasikan **Nginx Proxy Caching** untuk halaman web frontend dengan masa berlaku **10 menit** dan tambahkan header **`X-Cache-Status`**.
+2. Terapkan **rate limiting** pada path `/api` dengan batas **10 request per detik per IP klien**.
+3. Buktikan bahwa halaman web yang memenuhi syarat cache menghasilkan status `MISS` pada akses awal dan `HIT` pada akses berikutnya.
+4. Uji rate limiting secara terpisah dengan mengirimkan request beruntun ke `/api`, kemudian catat status respons yang dihasilkan ketika batas terlampaui.
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`gojo`** | `/root/soal19.sh` | Set IP, install Nginx, proxy cache `/` (10 menit), header `X-Cache-Status`, rate limit `/api`, dan access log khusus |
+| **`itadori`** | `/root/soal19_testing.sh` | Uji `MISS`/`HIT` dan uji burst request ke `/api` |
 
 ### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
+
+#### 1. Konfigurasi di `gojo`
+
+```bash
+cat << 'EOS' > /root/soal19.sh
+#!/bin/bash
+
+# 1. IP, gateway, DNS, install nginx (idempotent)
+ip addr flush dev eth0 2>/dev/null || true
+ip addr add 10.93.1.4/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.1.1 dev eth0 2>/dev/null || true
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+command -v nginx >/dev/null || {
+    apt-get update -y
+    apt-get install -y nginx curl
+}
+
+# 2. Folder cache
+mkdir -p /var/cache/nginx/gojo
+chown -R www-data:www-data /var/cache/nginx/gojo
+
+# 3. Config proxy + cache + rate limit
+cat << 'EOF' > /etc/nginx/sites-available/gojo-proxy.conf
+proxy_cache_path /var/cache/nginx/gojo levels=1:2 keys_zone=frontend_cache:10m max_size=100m inactive=10m use_temp_path=off;
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+
+# Format log untuk membedakan jenis kegagalan (dipakai di Soal 20)
+log_format gojo_log 'ip=$remote_addr req="$request" status=$status up_status=$upstream_status cache=$upstream_cache_status rt=$request_time urt=$upstream_response_time upstream=$upstream_addr';
+
+upstream frontend_cluster {
+    server 10.93.4.3:80; # maki
+    server 10.93.4.4:80; # panda
+}
+
+upstream api_gateway {
+    server 10.93.4.2:80; # geto
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name jujutsu.k59.com www.jujutsu.k59.com _;
+
+    access_log /var/log/nginx/gojo_access.log gojo_log;
+
+    # API: rate limit 10 r/s per IP klien, tidak di-cache
+    location /api {
+        limit_req zone=api_limit;
+        limit_req_status 429;
+
+        proxy_pass http://api_gateway/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Frontend: proxy cache 10 menit
+    location / {
+        proxy_cache frontend_cache;
+        proxy_cache_key "$scheme$host$request_uri";
+        proxy_cache_valid 200 10m;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status always;
+
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/gojo-proxy.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# 4. Validasi, lalu start/reload
+nginx -t || exit 1
+if pgrep nginx >/dev/null; then
+    nginx -s reload
+else
+    nginx
+fi
+sleep 1
+ss -tlnp | grep :80
+echo "Konfigurasi gojo Soal 19 selesai."
+EOS
+chmod +x /root/soal19.sh
+/root/soal19.sh
+```
+
+Catatan: setelah cache aktif, halaman `/` yang sudah tersimpan akan dijawab oleh worker yang sama (`maki` atau `panda`) selama 10 menit. Round robin baru terlihat lagi setelah cache kedaluwarsa. Ini perilaku normal caching. Konfigurasi ini menimpa `gojo-proxy.conf` dari Soal 16 dan 17, sehingga header `X-Real-IP` dan `X-Forwarded-For` tetap disertakan.
+
+#### 2. Kosongkan cache di `gojo`
+Agar akses pertama benar-benar `MISS`:
+
+```bash
+rm -rf /var/cache/nginx/gojo/*
+nginx -s reload
+```
+
+#### 3. Script testing di `itadori`
+
+```bash
+cat << 'EOF' > /root/soal19_testing.sh
+#!/bin/sh
+echo "TESTING SOAL 19: KLIEN $(hostname)"
+
+echo "[1] Akses halaman web (/) - akses 1 harus MISS, berikutnya HIT:"
+for i in 1 2 3; do
+    echo -n "Akses $i: "
+    curl -sI -H "Host: jujutsu.k59.com" http://10.93.1.4/ | grep -i "x-cache-status"
+done
+
+echo "[2] Burst 30 request paralel ke /api (batas 10 r/s):"
+for i in $(seq 1 30); do
+    curl -s -o /dev/null -w "%{http_code}\n" -H "Host: jujutsu.k59.com" http://10.93.1.4/api &
+done | sort | uniq -c
+wait
+EOF
+chmod +x /root/soal19_testing.sh
+/root/soal19_testing.sh
+```
+
+#### 4. Bukti di log `gojo`
+
+```bash
+grep "status=429" /var/log/nginx/gojo_access.log | tail -n 5
+tail -n 5 /var/log/nginx/error.log
+```
+
+Access log mencatat `status=429` dengan `up_status=-` (request ditolak di `gojo` dan tidak diteruskan ke `geto`), sedangkan `error.log` mencatat `limiting requests, excess: ... zone "api_limit"`.
+
+ <img width="1126" height="842" alt="image" src="https://github.com/user-attachments/assets/30d71578-af22-4a65-ae76-33ed7be92edb" />
+
+<img width="1107" height="833" alt="image" src="https://github.com/user-attachments/assets/aad5ad91-af1c-443b-b6d1-d0362dbb3dbc" />
+
  ---
 
 ## Soal 20
 ### Perintah soal
+Sebelum Curtain di Shibuya resmi dibuka, `kusakabe` memimpin audit untuk menguji kapasitas layanan:
+1. Dari terminal `kusakabe`, jalankan benchmark menggunakan Apache Benchmark dengan parameter `-n 600 -c 30` menuju `http://jujutsu.k59.com/`. Catat **Requests per Second (RPS)**, **latensi**, dan jumlah **request yang gagal**.
+2. Lakukan pengujian tambahan pada endpoint `/api` untuk mengamati efek rate limiting.
+3. Bandingkan hasil pengujian baseline dengan hasil ketika rate limiting aktif.
+4. Gunakan access log `gojo` untuk membedakan kegagalan **aplikasi**, **koneksi**, dan **request yang ditolak oleh kebijakan rate limit**.
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| **`kusakabe`** | `/root/soal20_testing.sh` | Menjalankan `ab` dan merangkum RPS, latensi, dan request gagal |
+| **`gojo`** | `/root/soal20_ratelimit.sh` | Mengaktifkan/menonaktifkan rate limiting `/api` (`on`/`off`) dan mengosongkan log |
+| **`gojo`** | `/root/soal20_log.sh` | Klasifikasi hasil dari `gojo_access.log` dan `error.log` |
 
 ### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
+
+#### 1. Script toggle rate limit dan klasifikasi log di `gojo`
+
+```bash
+cat << 'EOF' > /root/soal20_ratelimit.sh
+#!/bin/bash
+CONF=/etc/nginx/sites-available/gojo-proxy.conf
+case "$1" in
+  off) sed -i 's|^\(\s*\)limit_req zone=api_limit;|\1#limit_req zone=api_limit;|' $CONF ;;
+  on)  sed -i 's|^\(\s*\)#limit_req zone=api_limit;|\1limit_req zone=api_limit;|' $CONF ;;
+  *)   echo "pakai: $0 on|off"; exit 1 ;;
+esac
+nginx -t && nginx -s reload
+echo "Rate limiting /api: $1"
+grep -n "limit_req zone" $CONF
+# kosongkan log supaya hasil per skenario bersih
+> /var/log/nginx/gojo_access.log
+> /var/log/nginx/error.log
+echo "Log dikosongkan."
+EOF
+
+cat << 'EOF' > /root/soal20_log.sh
+#!/bin/bash
+LOG=/var/log/nginx/gojo_access.log
+ERR=/var/log/nginx/error.log
+echo "=== TOTAL REQUEST ==="; wc -l < $LOG
+echo -e "\n=== DISTRIBUSI STATUS ==="
+grep -o ' status=[0-9]*' $LOG | sort | uniq -c
+echo -e "\n=== DITOLAK RATE LIMIT (status=429, up_status=-) ==="
+grep ' status=429' $LOG | grep -c 'up_status=-'
+echo -e "\n=== GAGAL APLIKASI (status 5xx dari upstream) ==="
+grep -E ' status=5[0-9]{2}' $LOG | grep -c 'up_status=5'
+echo -e "\n=== GAGAL KONEKSI KE UPSTREAM (error.log) ==="
+grep -cE "connect\(\) failed|upstream timed out" $ERR
+echo -e "\n=== LOG RATE LIMIT DI error.log ==="
+grep -c "limiting requests" $ERR
+echo -e "\n=== STATUS CACHE ==="
+grep -o ' cache=[A-Z-]*' $LOG | sort | uniq -c
+EOF
+
+chmod +x /root/soal20_ratelimit.sh /root/soal20_log.sh
+```
+
+Cara membedakan jenis kegagalan:
+
+| Jenis kegagalan | Ciri di log `gojo` |
+|---|---|
+| Ditolak rate limit | `status=429`, `up_status=-` (tidak sampai ke upstream); `error.log`: `limiting requests` |
+| Gagal aplikasi | `status=5xx` dan `up_status=5xx` (error dari worker/database) |
+| Gagal koneksi | `error.log`: `connect() failed` / `upstream timed out`; pada `ab` muncul di baris `Connect` |
+
+#### 2. Script benchmark di `kusakabe`
+
+```bash
+cat << 'EOF' > /root/soal20_testing.sh
+#!/bin/sh
+# pakai: ./soal20_testing.sh <path> <label>
+# contoh: ./soal20_testing.sh / web_baseline
+P=${1:-/}
+LABEL=${2:-baseline}
+URL=http://10.93.1.4$P
+
+# IP dari DHCP kalau belum ada
+ip -br a show eth0 | grep -q '10.93.3' || udhcpc -i eth0 -n -q
+
+# DNS sementara ke gateway NAT (untuk apk)
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+command -v ab >/dev/null || apk add --no-cache apache2-utils
+
+echo "=== TESTING SOAL 20: $(hostname) - $LABEL -> $URL (Host: jujutsu.k59.com) ==="
+ab -n 600 -c 30 -H "Host: jujutsu.k59.com" $URL | tee /root/ab_$LABEL.txt | \
+  grep -E "Complete requests|Failed requests|Non-2xx|Requests per second|Time per request|Connect:|Processing:|Total:"
+EOF
+chmod +x /root/soal20_testing.sh
+```
+
+#### 3. Skenario A: baseline halaman web `/` (cache aktif)
+
+Di `gojo`:
+
+```bash
+/root/soal20_ratelimit.sh on
+```
+
+Di `kusakabe`:
+
+```bash
+/root/soal20_testing.sh / web_baseline
+```
+
+Di `gojo`:
+
+```bash
+/root/soal20_log.sh
+```
+
+![alt text](assets/soal20_1.png)
+
+#### 4. Skenario B: `/api` tanpa rate limit
+
+Di `gojo`:
+
+```bash
+/root/soal20_ratelimit.sh off
+```
+
+Di `kusakabe`:
+
+```bash
+/root/soal20_testing.sh /api api_tanpa_limit
+```
+
+Di `gojo`:
+
+```bash
+/root/soal20_log.sh
+```
+
+![alt text](assets/soal20_2.png)
+
+#### 5. Skenario C: `/api` dengan rate limit aktif
+
+Di `gojo`:
+
+```bash
+/root/soal20_ratelimit.sh on
+```
+
+Di `kusakabe`:
+
+```bash
+/root/soal20_testing.sh /api api_dengan_limit
+```
+
+Di `gojo`:
+
+```bash
+/root/soal20_log.sh
+```
+
+![alt text](assets/soal20_3.png)
+
+#### 6. Tabel perbandingan
+
+| Skenario | Requests per second | Time per request (mean) | Failed requests | Non-2xx | Catatan log `gojo` |
+|---|---|---|---|---|---|
+| Web `/` (cache aktif) | ... | ... | ... | ... | `cache=HIT` mendominasi |
+| `/api` tanpa rate limit | ... | ... | ... | ... | seluruh request `status=200` |
+| `/api` dengan rate limit | ... | ... | ... | ... | banyak `status=429`, `up_status=-` |
+
+#### 7. Analisis
+- **Web `/`**: RPS tinggi dan latensi rendah karena hampir seluruh request dijawab dari cache `gojo` (`HIT`) tanpa menyentuh `maki`/`panda`.
+- **`/api` tanpa rate limit**: RPS lebih rendah dan latensi lebih tinggi karena setiap request melewati `geto`, worker API, dan penulisan log ke database `yaga`. Seluruh request sukses.
+- **`/api` dengan rate limit**: RPS tampak lebih tinggi dan latensi rata-rata turun, tetapi bukan berarti performa membaik. Sebagian besar request ditolak dengan cepat (`429`) sehingga `ab` melaporkan `Non-2xx responses` yang besar, dan `Failed requests` bertipe `Length` dapat ikut naik karena ukuran body respons `429` berbeda dari respons sukses.
+- **Kesimpulan**: kegagalan akibat rate limit (`429`, disengaja oleh kebijakan) berbeda dari kegagalan aplikasi (`5xx` dari upstream) dan kegagalan koneksi (`connect() failed`). Ketiganya dapat dibedakan melalui `gojo_access.log` (`status` dan `up_status`) serta `error.log`.
+
+<img width="1105" height="822" alt="image" src="https://github.com/user-attachments/assets/faef93e5-705c-46ea-b67a-cb3f1ad69be0" />
+
+<img width="1115" height="837" alt="image" src="https://github.com/user-attachments/assets/90200c30-3672-49e6-8b02-742a8e25024d" />
+
+<img width="1106" height="836" alt="image" src="https://github.com/user-attachments/assets/96c79a26-d7b7-4225-ae64-3dc1a3687aab" />
+
    ini script
    ```
  
