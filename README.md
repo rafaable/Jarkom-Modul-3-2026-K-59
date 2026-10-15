@@ -1406,47 +1406,443 @@ Buka terminal itadori, picu pembaruan IP:
  ---
 
 ## Soal 9
+
 ### Perintah soal
+Sebuah gangguan memutus jalur relay dan membuat permintaan alamat tidak sampai ke Data Center:
+- Hentikan service DHCP Relay pada jichi, lalu paksa salah satu client di Network 2 atau Network 3 meminta lease baru dan catat gejalanya.
+- Pulihkan service relay, ulangi permintaan DHCP, lalu buktikan bahwa client kembali memperoleh alamat dari pool yang benar dengan gateway semula.
+
+Client uji: **itadori** (Network 2, Pool 1 `10.93.2.10 - 10.93.2.35`).
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| jichi | `/root/soal9.sh` | Menghentikan DHCP Relay (simulasi gangguan) |
+| itadori | `/root/soal9_testing.sh` | Reset IP, meminta lease baru, mencatat gejala/hasil |
+| jichi | `/root/soal9_recover.sh` | Menyalakan kembali DHCP Relay |
+| tengen | (command) | `tcpdump` untuk membuktikan paket DHCP sampai/tidak sampai |
 
 ### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
+
+#### 1. Hentikan relay di jichi
+
+```bash
+cat << 'EOF' > /root/soal9.sh
+#!/bin/bash
+echo "=== SIMULASI GANGGUAN: STOP DHCP RELAY ==="
+service isc-dhcp-relay stop 2>/dev/null
+pkill -9 dhcrelay 2>/dev/null
+sleep 1
+
+if pidof dhcrelay >/dev/null; then
+    echo ">>> [ERROR] dhcrelay masih berjalan (PID: $(pidof dhcrelay))"
+else
+    echo ">>> [OK] dhcrelay berhenti. Jalur relay terputus."
+fi
+EOF
+chmod +x /root/soal9.sh
+/root/soal9.sh
+```
+
+#### 2. Pantau paket di tengen (biarkan terbuka)
+
+```bash
+tcpdump -i eth0 -n port 67 or port 68
+```
+
+#### 3. Minta lease baru di itadori (saat relay mati)
+
+```bash
+cat << 'EOF' > /root/soal9_testing.sh
+#!/bin/sh
+echo "=== TESTING SOAL 9: KLIEN $(hostname) - $1 ==="
+
+echo "[1] Reset IP & minta lease baru (udhcpc):"
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip route flush dev eth0 2>/dev/null
+ip link set eth0 up
+udhcpc -i eth0 -n -q -t 3 -T 3
+echo "Exit code udhcpc: $?"
+
+echo "[2] Status IP eth0:"
+ip -br a show eth0
+
+echo "[3] Routing table:"
+ip route
+
+echo "[4] Ping gateway 10.93.2.1:"
+ping -c 3 -W 2 10.93.2.1
+EOF
+chmod +x /root/soal9_testing.sh
+/root/soal9_testing.sh "SAAT RELAY MATI"
+```
+
+**Gejala saat relay mati:**
+- `udhcpc` hanya mengirim `broadcasting discover` berulang, lalu `no lease, failing` (exit code 1).
+- `eth0` tidak memiliki alamat IPv4 dan tidak ada default route.
+- Ping ke gateway gagal (`Network is unreachable`).
+- `tcpdump` di tengen kosong: tidak ada paket DHCP yang sampai ke Data Center.
+
+#### 4. Pulihkan relay di jichi
+
+```bash
+cat << 'EOF' > /root/soal9_recover.sh
+#!/bin/bash
+echo "=== PEMULIHAN: START DHCP RELAY ==="
+pkill -9 dhcrelay 2>/dev/null
+sleep 1
+dhcrelay -4 -i eth2 -i eth3 -i eth4 10.93.4.10
+sleep 2
+
+if pidof dhcrelay >/dev/null; then
+    echo ">>> [OK] dhcrelay aktif (PID: $(pidof dhcrelay))"
+    ps aux | grep -v grep | grep dhcrelay
+else
+    echo ">>> [ERROR] dhcrelay belum aktif"
+fi
+EOF
+chmod +x /root/soal9_recover.sh
+/root/soal9_recover.sh
+```
+
+#### 5. Ulangi request di itadori (setelah relay pulih)
+
+Di tengen, jalankan capture dengan detail penuh:
+
+```bash
+tcpdump -i eth0 -n -vvv port 67 or port 68
+```
+
+Di itadori:
+
+```bash
+/root/soal9_testing.sh "SETELAH RELAY PULIH"
+```
+
+**Hasil setelah pulih:**
+- itadori memperoleh `10.93.2.x` di dalam Pool 1 (`10.93.2.10 - 10.93.2.35`), server `10.93.4.10`, lease time 600.
+- `default via 10.93.2.1`, ping ke gateway berhasil (0% loss).
+- `tcpdump` di tengen menampilkan paket dengan `Gateway-IP 10.93.2.1`, `Server-ID 10.93.4.10`, dan `Your-IP` dari Pool 1.
+
+#### Catatan pemulihan
+Saat pengujian, tengen ternyata juga bermasalah: IP eth0 berada di `10.93.4.8` (seharusnya `10.93.4.10`) dan paket `isc-dhcp-server` belum terpasang. Perbaikannya:
+
+```bash
+ip addr flush dev eth0
+ip addr add 10.93.4.10/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1
+
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update -y
+DEBIAN_FRONTEND=noninteractive apt-get install -y isc-dhcp-server
+
+mkdir -p /var/lib/dhcp && touch /var/lib/dhcp/dhcpd.leases
+dhcpd -4 -cf /etc/dhcp/dhcpd.conf eth0
+pidof dhcpd
+```
+
+Pada log tengen sempat muncul `DHCPNAK ... wrong network`. Itu normal: client masih memegang IP lama, ditolak server, lalu mengulang dari DISCOVER dan memperoleh `DHCPACK` yang benar.
+
+<img width="1112" height="778" alt="image" src="https://github.com/user-attachments/assets/1b57c202-9af1-407a-b661-75a8e9ced387" />
+
+<img width="1101" height="810" alt="image" src="https://github.com/user-attachments/assets/ba4d9ffe-b3d2-4fe9-99ba-0a977874d38f" />
+
+<img width="1103" height="817" alt="image" src="https://github.com/user-attachments/assets/2a55a58d-1627-4c81-b289-dc211df81db5" />
+
+<img width="1132" height="832" alt="image" src="https://github.com/user-attachments/assets/9975b521-86c6-44b9-b896-071b38fb98e4" />
+
+
  ---
 
 ## Soal 10
 ### Perintah soal
+Setelah gangguan Shibuya tertangani, pastikan pemulihan bertahan setelah restart:
+- Aktifkan autostart DHCP Server pada tengen dan DHCP Relay pada jichi, lalu restart kedua node.
+- Verifikasi status layanan, IP, gateway, lease, dan konektivitas client Network 2-3.
+- Pastikan kebijakan Pool 1, Pool 2, short lease, long lease, dan fixed address tetap berlaku.
+
+### Penempatan Script pada Node
+
+| Node | File Script | Fungsi |
+|---|---|---|
+| tengen | `/root/soal10.sh` | Backup config final, membuat `autostart.sh`, mengaktifkan autostart |
+| tengen | `/root/autostart.sh` | Set IP statis, restore config bila hilang, start dhcpd |
+| jichi | `/root/soal10.sh` | Membuat `autostart.sh`, mengaktifkan autostart relay |
+| jichi | `/root/autostart.sh` | Forwarding, NAT, IP interface, start dhcrelay |
+| tengen, jichi, semua client | `/root/soal10_testing.sh` | Verifikasi setelah restart |
 
 ### Langkah pengerjaan
-1. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-2. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
-3. Buat blablabla
-   
-   ```bash
-   ini script
-   ```
- 
+
+#### 1. Simpan konfigurasi final di tengen
+
+Pastikan `dhcpd.conf` sudah final (class, pool, dan blok `host kugisaki` ada), lalu backup:
+
+```bash
+grep -cE "allow members|range|host kugisaki" /etc/dhcp/dhcpd.conf
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && echo "sintaks OK"
+cp /etc/dhcp/dhcpd.conf /root/dhcpd.conf.final
+```
+
+#### 2. Autostart DHCP Server di tengen
+
+```bash
+cat << 'EOF' > /root/soal10.sh
+#!/bin/bash
+echo "=== SOAL 10: AUTOSTART tengen ==="
+
+cp /etc/dhcp/dhcpd.conf /root/dhcpd.conf.final
+cp /etc/default/isc-dhcp-server /root/isc-dhcp-server.default
+
+cat << 'EOS' > /root/autostart.sh
+#!/bin/bash
+sleep 3
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# IP statis
+ip addr flush dev eth0 2>/dev/null
+ip addr add 10.93.4.10/24 dev eth0
+ip link set eth0 up
+ip route replace default via 10.93.4.1
+
+# Install paket jika belum ada
+if ! command -v dhcpd >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y isc-dhcp-server
+fi
+
+# Restore config jika hilang / tidak lengkap
+if ! grep -q "host kugisaki" /etc/dhcp/dhcpd.conf 2>/dev/null; then
+    cp /root/dhcpd.conf.final /etc/dhcp/dhcpd.conf
+fi
+
+mkdir -p /var/lib/dhcp && touch /var/lib/dhcp/dhcpd.leases
+pkill -9 dhcpd; rm -f /var/run/dhcpd.pid
+dhcpd -4 -cf /etc/dhcp/dhcpd.conf eth0
+EOS
+chmod +x /root/autostart.sh
+
+# Pemicu saat console dibuka (idempotent)
+grep -q autostart.sh /root/.bashrc || echo '/root/autostart.sh >/dev/null 2>&1 &' >> /root/.bashrc
+
+# Autostart via init script
+sed -i 's/^INTERFACESv4=.*/INTERFACESv4="eth0"/' /etc/default/isc-dhcp-server
+sed -i 's/^INTERFACESv6=.*/INTERFACESv6=""/' /etc/default/isc-dhcp-server
+if command -v update-rc.d >/dev/null 2>&1 && [ -f /etc/init.d/isc-dhcp-server ]; then
+    update-rc.d isc-dhcp-server defaults
+    update-rc.d isc-dhcp-server enable
+fi
+echo ">>> Selesai."
+EOF
+chmod +x /root/soal10.sh
+/root/soal10.sh
+```
+
+Bukti autostart aktif:
+
+```bash
+ls /etc/rc2.d | grep -i dhcp
+grep -E "^INTERFACES" /etc/default/isc-dhcp-server
+tail -n 1 /root/.bashrc
+```
+
+#### 3. Autostart DHCP Relay di jichi
+
+```bash
+cat << 'EOF' > /root/soal10.sh
+#!/bin/bash
+echo "=== SOAL 10: AUTOSTART jichi ==="
+
+cat << 'EOS' > /root/autostart.sh
+#!/bin/bash
+sleep 3
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+echo 1 > /proc/sys/net/ipv4/ip_forward
+iptables -P FORWARD ACCEPT
+iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+# IP statis interface Network 1-4
+for p in "eth1 10.93.1.1/24" "eth2 10.93.2.1/24" "eth3 10.93.3.1/24" "eth4 10.93.4.1/24"; do
+    set -- $p
+    ip addr show dev $1 | grep -q "${2%/*}" || ip addr add $2 dev $1
+    ip link set $1 up
+done
+
+# Install relay jika belum ada
+if ! command -v dhcrelay >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y isc-dhcp-relay
+fi
+
+# Isi ARP ke tengen, lalu start ulang relay
+ping -c 2 -W 2 10.93.4.10 >/dev/null 2>&1
+pkill -9 dhcrelay 2>/dev/null
+sleep 1
+dhcrelay -4 -i eth2 -i eth3 -i eth4 10.93.4.10
+EOS
+chmod +x /root/autostart.sh
+
+grep -q autostart.sh /root/.bashrc || echo '/root/autostart.sh >/dev/null 2>&1 &' >> /root/.bashrc
+
+cat << 'EOS' > /etc/default/isc-dhcp-relay
+SERVERS="10.93.4.10"
+INTERFACES="eth2 eth3 eth4"
+OPTIONS=""
+EOS
+cp /etc/default/isc-dhcp-relay /root/isc-dhcp-relay.default
+
+if command -v update-rc.d >/dev/null 2>&1 && [ -f /etc/init.d/isc-dhcp-relay ]; then
+    update-rc.d isc-dhcp-relay defaults
+    update-rc.d isc-dhcp-relay enable
+fi
+echo ">>> Selesai."
+EOF
+chmod +x /root/soal10.sh
+/root/soal10.sh
+```
+
+Bukti autostart aktif:
+
+```bash
+ls /etc/rc2.d | grep -i dhcp
+cat /etc/default/isc-dhcp-relay
+tail -n 1 /root/.bashrc
+```
+
+#### 4. Restart tengen dan jichi
+
+Di GNS3: **Stop lalu Start** node `tengen` dan `jichi`, lalu buka console keduanya (pemicu `.bashrc` berjalan saat console dibuka) dan tunggu sekitar 10-15 detik. Pastikan file di `/root` masih ada:
+
+```bash
+ls /root
+```
+
+#### 5. Verifikasi layanan setelah restart
+
+Di tengen:
+
+```bash
+cat << 'EOF' > /root/soal10_testing.sh
+#!/bin/bash
+echo "=== TESTING SOAL 10: tengen ==="
+echo "[1] Proses dhcpd:"; pidof dhcpd || echo ">>> dhcpd MATI"
+echo "[2] IP & gateway:"; ip -br a show eth0; ip route
+echo "[3] Port UDP 67:"; ss -ulpn | grep ':67\b'
+echo "[4] Config:"; dhcpd -t -cf /etc/dhcp/dhcpd.conf && echo ">>> sintaks OK"
+grep -A3 "host kugisaki" /etc/dhcp/dhcpd.conf
+echo "[5] Lease:"; grep -E "^lease|ends|hardware ethernet" /var/lib/dhcp/dhcpd.leases
+echo "[6] Ping:"; ping -c 2 10.93.4.1; ping -c 2 8.8.8.8
+EOF
+chmod +x /root/soal10_testing.sh
+/root/soal10_testing.sh
+```
+
+Di jichi:
+
+```bash
+cat << 'EOF' > /root/soal10_testing.sh
+#!/bin/bash
+echo "=== TESTING SOAL 10: jichi ==="
+echo "[1] Proses dhcrelay:"; pidof dhcrelay && ps aux | grep -v grep | grep dhcrelay || echo ">>> relay MATI"
+echo "[2] IP interface:"; ip -br a
+echo "[3] Forwarding & NAT:"; cat /proc/sys/net/ipv4/ip_forward; iptables -t nat -L POSTROUTING -n
+echo "[4] ARP ke tengen:"; ping -c 2 10.93.4.10; ip neigh show dev eth4
+echo "[5] Ping internet:"; ping -c 2 8.8.8.8
+EOF
+chmod +x /root/soal10_testing.sh
+/root/soal10_testing.sh
+```
+
+#### 6. Verifikasi client Network 2-3
+
+Jalankan di itadori, fushiguro, zenin, okkotsu, ino, kusakabe, miwa, dan kugisaki:
+
+```bash
+cat << 'EOF' > /root/soal10_testing.sh
+#!/bin/sh
+H=$(hostname)
+echo "=== TESTING SOAL 10: KLIEN $H ==="
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0 -n -q
+
+echo "[1] IP, mask, broadcast:"; ip a show eth0 | grep -E "inet |brd"
+echo "[2] Routing:"; ip route
+echo "[3] DNS & domain search:"; cat /etc/resolv.conf
+
+case "$H" in
+  itadori|fushiguro) EXP="Pool 1: 10.93.2.10 - 10.93.2.35"; GW=10.93.2.1 ;;
+  zenin|okkotsu)     EXP="Pool 2: 10.93.2.70 - 10.93.2.95"; GW=10.93.2.1 ;;
+  ino|kusakabe)      EXP="Short lease 1800s: 10.93.3.10 - 10.93.3.89"; GW=10.93.3.1 ;;
+  miwa)              EXP="Long lease 43200s: 10.93.3.100 - 10.93.3.199"; GW=10.93.3.1 ;;
+  kugisaki)          EXP="Fixed address: 10.93.3.99"; GW=10.93.3.1 ;;
+esac
+echo "[4] Yang diharapkan: $EXP"
+echo "[5] Ping gateway $GW & internet:"; ping -c 2 $GW; ping -c 2 8.8.8.8
+EOF
+chmod +x /root/soal10_testing.sh
+/root/soal10_testing.sh
+```
+
+Pencocokan lease di tengen (memastikan tidak ada alamat bentrok atau di luar pool):
+
+```bash
+grep -E "^lease|ends|hardware ethernet" /var/lib/dhcp/dhcpd.leases
+```
+
+**Hasil yang dibuktikan setelah restart:**
+- tengen: `dhcpd` aktif otomatis, eth0 `10.93.4.10/24`, UDP 67 listening.
+- jichi: `dhcrelay` aktif otomatis, eth1-eth4 benar, `ip_forward=1`, MASQUERADE ada.
+- itadori dan fushiguro memperoleh Pool 1, zenin dan okkotsu memperoleh Pool 2 (rentang `.2.36 - .2.69` tidak terpakai).
+- ino dan kusakabe memperoleh `10.93.3.10 - 10.93.3.89` (lease 1800), miwa memperoleh `10.93.3.100 - 10.93.3.199` (lease 43200), kugisaki selalu memperoleh `10.93.3.99`.
+- Semua client memiliki gateway `.2.1`/`.3.1`, DNS `10.93.1.2` dan `10.93.1.3`, serta `search k59.com` di Network 3.
+
+### Gejala dan pemulihan yang ditemukan
+
+Setelah restart, client sempat gagal memperoleh lease. Penyebab dan perbaikannya:
+
+**1. IP `10.93.4.10` dipakai dua node.**
+- Gejala: `tcpdump` di tengen kosong walaupun DISCOVER sudah sampai di eth2 jichi. ARP di jichi untuk `10.93.4.10` menunjuk MAC node lain, bukan tengen.
+- Pemeriksaan:
+  ```bash
+  # di jichi
+  ip neigh flush dev eth4
+  ping -c 2 10.93.4.10
+  ip neigh show dev eth4
+  # di tengen
+  ip link show eth0 | grep ether
+  ```
+- Penyebab: inumaki memegang `10.93.4.10/24` (MAC berbeda dari tengen).
+- Pemulihan (di inumaki):
+  ```bash
+  ip addr del 10.93.4.10/24 dev eth0
+  ip addr add 10.93.4.11/24 dev eth0
+  ip route replace default via 10.93.4.1
+  ```
+
+**2. `dhcpd.conf` tertimpa versi Soal 2.**
+- Gejala: log dhcpd menampilkan `network 10.93.2.0/24: no free leases` karena tidak ada `range`/`pool` di config.
+- Pemulihan (di tengen):
+  ```bash
+  cp /root/dhcpd.conf.final /etc/dhcp/dhcpd.conf
+  dhcpd -t -cf /etc/dhcp/dhcpd.conf && echo "sintaks OK"
+  pkill -9 dhcpd; rm -f /var/run/dhcpd.pid
+  dhcpd -4 -cf /etc/dhcp/dhcpd.conf eth0
+  pidof dhcpd
+  ```
+- Pencegahan: jangan menjalankan ulang `soal2.sh` sampai `soal5.sh` di tengen, karena script itu menimpa `dhcpd.conf`.
+
+Setelah kedua masalah diperbaiki, seluruh client memperoleh lease sesuai kebijakan dan layanan naik otomatis setelah restart.
+
+<img width="1112" height="807" alt="image" src="https://github.com/user-attachments/assets/1207e669-bf93-42c8-81ea-fc6c3a26abc0" />
+
+<img width="1121" height="825" alt="image" src="https://github.com/user-attachments/assets/fbc03a9a-617e-48f4-8c38-1fb6368bc4cf" />
+
+<img width="1102" height="848" alt="image" src="https://github.com/user-attachments/assets/142e7a4c-5862-4fa8-8533-99f0cd4ec94b" />
+
  ---
 
 ## Soal 11
