@@ -4075,4 +4075,163 @@ Di `gojo`:
 
 <img width="1106" height="836" alt="image" src="https://github.com/user-attachments/assets/96c79a26-d7b7-4225-ae64-3dc1a3687aab" />
 
+
+## REVISI
+### Soal 19
+## Ringkasan Masalah Saat Demo
+
+Saat demo, **Soal 19 gagal** (cache selalu MISS, muncul error 502 saat uji rate limit) sehingga **Soal 20 ikut gagal** (hasil benchmark tidak masuk akal — banyak error, cache tidak pernah HIT). Setelah ditelusuri, **akar masalahnya cuma satu**: rantai backend (DB Master → Worker Frontend/API → Load Balancer → Public Reverse Proxy) sempat putus/belum lengkap berdiri.
+
+Begitu rantai backend diperbaiki dan Soal 19 dikonfigurasi ulang, **Soal 20 langsung lancar tanpa ada satupun perubahan di dalamnya sendiri**. Penjelasan lengkap dan teorinya ada di bagian akhir dokumen ini.
+
+---
+
+### Perintah Soal
+- Konfigurasi Nginx Proxy Caching untuk halaman web frontend (`/`) dengan masa berlaku 10 menit, tambahkan header `X-Cache-Status`.
+- Terapkan rate limiting pada path `/api` dengan batas 10 request/detik per IP klien.
+- Buktikan akses awal halaman web = **MISS**, akses berikutnya = **HIT**.
+- Uji rate limiting dengan request beruntun ke `/api`, catat status respons saat batas terlampaui.
+
+### Langkah Pengerjaan (Konfigurasi)
+
+Di **gojo**, jalankan:
+```bash
+chmod +x /root/soal19.sh
+/root/soal19.sh
+```
+Script ini menambahkan `proxy_cache_path`, `limit_req_zone`, serta dua `location` block (`/api` dengan rate limit, `/` dengan cache) ke `gojo-proxy.conf`, lalu reload Nginx.
+
+Kosongkan cache sebelum testing (supaya akses pertama benar-benar MISS):
+```bash
+rm -rf /var/cache/nginx/gojo/*
+nginx -s reload
+```
+
+Testing dijalankan di **itadori**:
+```bash
+chmod +x /root/soal19_testing.sh
+/root/soal19_testing.sh
+```
+
+### Gejala Kegagalan Saat Demo
+
+| Bagian | Hasil yang Muncul | Seharusnya |
+|---|---|---|
+| [1] Cache `/` | MISS, MISS, MISS (ketiga akses) | MISS, HIT, HIT |
+| [2] Rate limit `/api` | 29× `429`, 1× `502` | Sebagian `200`, sisanya `429` (tanpa `502`) |
+
+### Analisis Akar Masalah
+
+Munculnya `502 Bad Gateway` adalah tanda paling jelas: itu bukan masalah di konfigurasi cache/rate-limit itu sendiri, melainkan **upstream (backend) tidak bisa dihubungi atau gagal merespons**. Karena `location /` di gojo meneruskan ke `frontend_cluster` (maki, panda) dan `location /api` meneruskan ke `api_gateway` (geto → nanami/todo/kirara), kalau salah satu dari rantai ini mati:
+
+- Cache tidak pernah bisa menyimpan response **200** yang valid → selalu MISS.
+- Request ke `/api` yang lolos dari rate limit tetap gagal dijawab backend → `502`.
+
+Dicek satu per satu dari hulu ke hilir (`yaga` → `maki`/`panda` → `nanami`/`todo`/`kirara` → `geto` → `gojo`), ditemukan sebagian node di rantai backend (hasil kerja Soal 13–18) belum berdiri lengkap/sempat ter-reset.
+
+### Langkah Perbaikan
+
+Dijalankan ulang **berurutan**, bukan mengubah apapun di konfigurasi Soal 19:
+
+| Urutan | Node | Jalankan |
+|---|---|---|
+| 1 | yaga | `/root/soal13.sh` |
+| 2 | inumaki | `/root/soal13.sh` |
+| 3 | maki, panda | `/root/soal14.sh` |
+| 4 | nanami, todo, kirara | `/root/soal14.sh` |
+| 5 | geto | `/root/soal15.sh` |
+| 6 | gojo | `/root/soal16.sh` |
+| 7 | gojo | `/root/soal17.sh` |
+| 8 | geto | `/root/soal17.sh` |
+| 9 | geto | `/root/soal18.sh` |
+| 10 | gojo | `/root/soal19.sh` (reload cache + rate limit) |
+
+### Hasil Setelah Perbaikan
+
+Dijalankan ulang `/root/soal19_testing.sh` di **itadori**:
+
+| Bagian | Hasil |
+|---|---|
+| [1] Cache `/` | Akses 1: **MISS**, Akses 2: **HIT**, Akses 3: **HIT** ✅ |
+| [2] Rate limit `/api` (30 request paralel) | **1× `200`**, **29× `429`**, tidak ada `502` ✅ |
+
+Kedua hasil sudah sesuai target soal.
+
+<img width="1091" height="825" alt="image" src="https://github.com/user-attachments/assets/7b00eadd-b758-4eb4-97e6-f8c94a2a7249" />
+
+---
+
+## Soal 20 — Load Testing dengan Apache Benchmark
+
+### Perintah Soal
+- Jalankan `ab -n 600 -c 30` ke `http://jujutsu.k59.com/`, catat RPS, latensi, dan request gagal.
+- Uji tambahan pada endpoint `/api` untuk mengamati efek rate limiting.
+- Bandingkan hasil baseline vs saat rate limiting aktif.
+- Gunakan access log gojo untuk membedakan kegagalan aplikasi, koneksi, dan request yang ditolak rate limit.
+
+### Catatan Penting: Tidak Ada Perubahan di Soal 20
+
+Setelah Soal 19 diperbaiki (lihat bagian di atas), **Soal 20 langsung bisa dites dengan lancar tanpa mengubah satu baris pun** di `soal20.sh`, `soal20_ratelimit.sh`, `soal20_log.sh`, maupun `soal20_testing.sh`. Tidak ada script yang diedit, tidak ada config Nginx tambahan yang disentuh khusus untuk Soal 20.
+
+### Langkah Testing (Normal, Tanpa Modifikasi)
+
+**Skenario A — Web baseline (`/`, cache aktif)**
+```bash
+# di gojo
+/root/soal20_ratelimit.sh on
+
+# di kusakabe
+/root/soal20_testing.sh / web_baseline
+
+# di gojo
+/root/soal20_log.sh
+```
+
+**Skenario B — `/api` tanpa rate limit**
+```bash
+# di gojo
+/root/soal20_ratelimit.sh off
+
+# di kusakabe
+/root/soal20_testing.sh /api api_tanpa_limit
+
+# di gojo
+/root/soal20_log.sh
+```
+
+**Skenario C — `/api` dengan rate limit aktif**
+```bash
+# di gojo
+/root/soal20_ratelimit.sh on
+
+# di kusakabe
+/root/soal20_testing.sh /api api_dengan_limit
+
+# di gojo
+/root/soal20_log.sh
+```
+
+### Hasil Pengujian
+
+| Skenario | Requests per second (ab) | Failed requests (ab) | Distribusi Status (nginx log) | Cache |
+|---|---|---|---|---|
+| A. Web `/` baseline | 3208.33 | 0 | 600× `200` | 600× HIT |
+| B. `/api` tanpa limit | 612.54 | 149 (Length-mismatch, bukan error nyata) | 600× `200` | `-` (tidak di-cache) |
+| C. `/api` dengan limit | *(lihat hasil `ab` skenario C)* | — | 2× `200`, 598× `429` | `-` (tidak di-cache) |
+
+Catatan: "Failed requests: 149" pada skenario B bukan error sungguhan — `ab` menghitung response dengan panjang body berbeda sebagai "Length mismatch". Ini wajar karena API mengembalikan JSON dinamis (ada data log/ID yang berubah tiap request).
+
+Pembeda jenis kegagalan di skenario C (dari `soal20_log.sh`):
+- **Ditolak rate limit** (`status=429`, `up_status=-`): 598
+- **Gagal aplikasi** (5xx dari upstream): 0
+- **Gagal koneksi** (`error.log`): 0
+
+Ini membuktikan seluruh penolakan di skenario C murni kebijakan rate limit, bukan error aplikasi atau koneksi.
+
+---
+
+<img width="1115" height="837" alt="image" src="https://github.com/user-attachments/assets/90200c30-3672-49e6-8b02-742a8e25024d" />
+
+<img width="1106" height="836" alt="image" src="https://github.com/user-attachments/assets/96c79a26-d7b7-4225-ae64-3dc1a3687aab" />
+
    
